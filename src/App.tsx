@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { Position, Activity, SessionStats, TradeRow } from './types';
-import { fetchPositions, fetchActivity, computeStats, buildTradeRows, PROXY_WALLET } from './lib/polymarket';
+import type { Position, Activity, SessionStats, TradeRow, TradeLogRow } from './types';
+import { fetchPositions, fetchActivity, computeStats, buildTradeRows, buildTradeLogRows, PROXY_WALLET } from './lib/polymarket';
 
 const REFRESH_INTERVAL = 30_000;
 
@@ -48,6 +48,8 @@ export default function App() {
   const [activity, setActivity] = useState<Activity[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [tradeRows, setTradeRows] = useState<TradeRow[]>([]);
+  const [tradeLog, setTradeLog] = useState<TradeLogRow[]>([]);
+  const [view, setView] = useState<'dashboard' | 'tradelog'>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -61,6 +63,7 @@ export default function App() {
       setActivity(act);
       setStats(computeStats(pos, act));
       setTradeRows(buildTradeRows(pos, act));
+      setTradeLog(buildTradeLogRows(pos, act));
       setLastUpdated(new Date());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load data');
@@ -101,6 +104,16 @@ export default function App() {
                 Updated {lastUpdated.toLocaleTimeString()}
               </span>
             )}
+            <button
+              onClick={() => setView(v => v === 'tradelog' ? 'dashboard' : 'tradelog')}
+              className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                view === 'tradelog'
+                  ? 'bg-blue-600 border-blue-500 text-white'
+                  : 'bg-gray-800/50 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`}
+            >
+              Trade Log
+            </button>
             <span className="text-xs text-gray-600 px-3 py-1 rounded-full bg-gray-800/50 border border-gray-800">
               ↻ 30s
             </span>
@@ -124,6 +137,114 @@ export default function App() {
           </div>
         ) : stats ? (
           <>
+            {view === 'tradelog' ? (
+              <section className="animate-fade-in">
+                <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
+                  Trade Log ({tradeLog.length} trades)
+                </h2>
+                <div className="rounded-xl border border-gray-800 overflow-x-auto">
+                  <table className="w-full text-sm whitespace-nowrap">
+                    <thead>
+                      <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
+                        <th className="text-right px-3 py-3">A #</th>
+                        <th className="text-left px-3 py-3">B Date</th>
+                        <th className="text-left px-3 py-3 min-w-48">C Market</th>
+                        <th className="text-left px-3 py-3">D Sport</th>
+                        <th className="text-left px-3 py-3">E Type</th>
+                        <th className="text-left px-3 py-3">F Side</th>
+                        <th className="text-right px-3 py-3">G Entry</th>
+                        <th className="text-right px-3 py-3">H Shares</th>
+                        <th className="text-right px-3 py-3">I Size</th>
+                        <th className="text-right px-3 py-3">J Exit</th>
+                        <th className="text-center px-3 py-3">K Outcome</th>
+                        <th className="text-right px-3 py-3">L P&amp;L</th>
+                        <th className="text-right px-3 py-3">M P&amp;L%</th>
+                        <th className="text-left px-3 py-3">N Notes</th>
+                        <th className="text-left px-3 py-3">O FeeCat</th>
+                        <th className="text-right px-3 py-3">P BuyFee</th>
+                        <th className="text-right px-3 py-3">Q SellFee</th>
+                        <th className="text-right px-3 py-3">R TotalFee</th>
+                        <th className="text-right px-3 py-3">S Net P&amp;L</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800/50">
+                      {tradeLog.map((row) => (
+                        <tr key={row.num} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
+                          <td className="px-3 py-2.5 text-right text-gray-600 tabular-nums">{row.num}</td>
+                          <td className="px-3 py-2.5 text-gray-400 tabular-nums">{row.date}</td>
+                          <td className="px-3 py-2.5">
+                            <div className="flex items-center gap-2">
+                              {row.icon && (
+                                <img src={row.icon} alt="" className="w-4 h-4 rounded-full object-cover shrink-0" />
+                              )}
+                              <span className="text-gray-200 line-clamp-1 max-w-48">{row.market}</span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2.5 text-gray-400">{row.sport}</td>
+                          <td className="px-3 py-2.5">
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${row.type === 'Latency Arb' ? 'text-purple-400 bg-purple-500/10' : 'text-orange-400 bg-orange-500/10'}`}>
+                              {row.type}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2.5 text-blue-300">{row.side}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-300">{fmtCents(row.entry)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-300">{row.shares.toFixed(1)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-400">{fmt$abs(row.size)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-300">
+                            {row.exit !== null ? fmtCents(row.exit) : '—'}
+                          </td>
+                          <td className="px-3 py-2.5 text-center">
+                            {row.outcome === 'WIN' ? (
+                              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">WIN</span>
+                            ) : row.outcome === 'LOSS' ? (
+                              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">LOSS</span>
+                            ) : (
+                              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-500/15 text-gray-500 border border-gray-500/30">—</span>
+                            )}
+                          </td>
+                          <td className={`px-3 py-2.5 text-right tabular-nums font-medium ${row.pnl === null ? 'text-gray-600' : row.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {row.pnl === null ? '—' : fmt$(row.pnl)}
+                          </td>
+                          <td className={`px-3 py-2.5 text-right tabular-nums ${row.pnlPct === null ? 'text-gray-600' : row.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {row.pnlPct === null ? '—' : fmtPct(row.pnlPct)}
+                          </td>
+                          <td className="px-3 py-2.5 text-gray-600 text-xs">{row.notes || '—'}</td>
+                          <td className="px-3 py-2.5 text-gray-500 text-xs">{row.feeCat}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-500 text-xs">{fmt$abs(row.buyFee)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-500 text-xs">{fmt$abs(row.sellFee)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-500 text-xs">{fmt$abs(row.totalFees)}</td>
+                          <td className={`px-3 py-2.5 text-right tabular-nums font-medium text-xs ${row.netPnl === null ? 'text-gray-600' : row.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {row.netPnl === null ? '—' : fmt$(row.netPnl)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-gray-900 border-t border-gray-700">
+                        <td colSpan={11} className="px-3 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
+                        <td className={`px-3 py-3 text-right tabular-nums font-bold ${stats.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {fmt$(stats.totalPnl)}
+                        </td>
+                        <td />
+                        <td />
+                        <td />
+                        <td className="px-3 py-3 text-right tabular-nums font-bold text-gray-400 text-xs">
+                          {fmt$abs(stats.totalFees)}
+                        </td>
+                        <td />
+                        <td className="px-3 py-3 text-right tabular-nums font-bold text-xs">
+                          {fmt$abs(stats.totalFees)}
+                        </td>
+                        <td className={`px-3 py-3 text-right tabular-nums font-bold text-xs ${stats.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {fmt$(stats.netPnl)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </section>
+            ) : (
+            <>
             {/* KPI Row 1 */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 animate-fade-in">
               <KpiCard label="Total Trades"     value={String(stats.totalTrades)} />
@@ -273,6 +394,8 @@ export default function App() {
                 </table>
               </div>
             </section>
+          </>
+          )}
           </>
         ) : null}
       </main>

@@ -43,6 +43,29 @@ export interface TradeRow {
   icon: string;
 }
 
+export interface TradeLogRow {
+  num: number;           // A
+  date: string;          // B
+  market: string;        // C
+  sport: string;         // D
+  type: string;          // E
+  side: string;          // F
+  entry: number;         // G
+  shares: number;        // H
+  size: number;          // I  = G × H
+  exit: number | null;   // J
+  outcome: string;       // K
+  pnl: number | null;    // L  = (J - G) × H
+  pnlPct: number | null; // M  = L / I
+  notes: string;         // N
+  feeCat: string;        // O
+  buyFee: number;        // P
+  sellFee: number;       // Q
+  totalFees: number;     // R  = P + Q
+  netPnl: number | null; // S  = L - R
+  icon: string;
+}
+
 export interface SessionStats {
   totalTrades: number;
   portfolioValue: number;
