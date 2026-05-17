@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Position, SessionStats, TradeRow, TradeLogRow } from './types';
 import { fetchPositions, fetchActivity, computeStats, buildTradeRows, buildTradeLogRows, PROXY_WALLET } from './lib/polymarket';
 
-const REFRESH_INTERVAL = 30_000;
+const REFRESH_INTERVAL = 60 * 60 * 1000;
 
 const fmt$ = (n: number, decimals = 2) =>
   (n >= 0 ? '+' : '') + n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -375,8 +375,14 @@ export default function App() {
                 Updated {lastUpdated.toLocaleTimeString()}
               </span>
             )}
+            <button
+              onClick={load}
+              className="text-xs font-medium px-3 py-1.5 rounded-lg border bg-gray-800/50 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+            >
+              ↻ Refresh
+            </button>
             <span className="text-xs text-gray-600 px-3 py-1 rounded-full bg-gray-800/50 border border-gray-800">
-              ↻ 30s
+              ↻ 1h
             </span>
           </div>
         </div>
