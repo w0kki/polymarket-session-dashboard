@@ -66,7 +66,6 @@ function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: Ses
               <th className="text-center px-3 py-3">Outcome</th>
               <th className="text-right px-3 py-3">P&amp;L</th>
               <th className="text-right px-3 py-3">P&amp;L%</th>
-              <th className="text-left px-3 py-3">Notes</th>
               <th className="text-left px-3 py-3">Fee Cat</th>
               <th className="text-right px-3 py-3">Buy Fee</th>
               <th className="text-right px-3 py-3">Sell Fee</th>
@@ -115,7 +114,6 @@ function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: Ses
                 <td className={`px-3 py-2.5 text-right tabular-nums ${row.pnlPct === null ? 'text-gray-600' : row.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                   {row.pnlPct === null ? '—' : fmtPct(row.pnlPct)}
                 </td>
-                <td className="px-3 py-2.5 text-gray-600 text-xs">{row.notes || '—'}</td>
                 <td className="px-3 py-2.5 text-gray-500 text-xs">{row.feeCat}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums text-gray-500 text-xs">{fmt$abs(row.buyFee)}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums text-gray-500 text-xs">{fmt$abs(row.sellFee)}</td>
@@ -128,7 +126,7 @@ function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: Ses
           </tbody>
           <tfoot>
             <tr className="bg-gray-900 border-t border-gray-700">
-              <td colSpan={11} className="px-3 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
+              <td colSpan={10} className="px-3 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
               <td className={`px-3 py-3 text-right tabular-nums font-bold ${stats.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                 {fmt$(stats.totalPnl)}
               </td>
