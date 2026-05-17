@@ -359,14 +359,6 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {lastUpdated && (
-              <span
-                key={lastUpdated.getTime()}
-                className="text-xs text-gray-500 animate-flash-update px-3 py-1 rounded-full bg-gray-800/50 border border-gray-800"
-              >
-                Updated {lastUpdated.toLocaleTimeString()}
-              </span>
-            )}
             <button
               onClick={() => setView(v => v === 'tradelog' ? 'dashboard' : 'tradelog')}
               className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
@@ -377,6 +369,14 @@ export default function App() {
             >
               Trade Log
             </button>
+            {lastUpdated && (
+              <span
+                key={lastUpdated.getTime()}
+                className="text-xs text-gray-500 animate-flash-update px-3 py-1 rounded-full bg-gray-800/50 border border-gray-800"
+              >
+                Updated {lastUpdated.toLocaleTimeString()}
+              </span>
+            )}
             <span className="text-xs text-gray-600 px-3 py-1 rounded-full bg-gray-800/50 border border-gray-800">
               ↻ 30s
             </span>
