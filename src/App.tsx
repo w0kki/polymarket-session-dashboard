@@ -53,25 +53,25 @@ function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: Ses
         <table className="w-full text-sm whitespace-nowrap">
           <thead>
             <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
-              <th className="text-right px-3 py-3">A #</th>
-              <th className="text-left px-3 py-3">B Date</th>
-              <th className="text-left px-3 py-3 min-w-48">C Market</th>
-              <th className="text-left px-3 py-3">D Sport</th>
-              <th className="text-left px-3 py-3">E Type</th>
-              <th className="text-left px-3 py-3">F Side</th>
-              <th className="text-right px-3 py-3">G Entry</th>
-              <th className="text-right px-3 py-3">H Shares</th>
-              <th className="text-right px-3 py-3">I Size</th>
-              <th className="text-right px-3 py-3">J Exit</th>
-              <th className="text-center px-3 py-3">K Outcome</th>
-              <th className="text-right px-3 py-3">L P&amp;L</th>
-              <th className="text-right px-3 py-3">M P&amp;L%</th>
-              <th className="text-left px-3 py-3">N Notes</th>
-              <th className="text-left px-3 py-3">O FeeCat</th>
-              <th className="text-right px-3 py-3">P BuyFee</th>
-              <th className="text-right px-3 py-3">Q SellFee</th>
-              <th className="text-right px-3 py-3">R TotalFee</th>
-              <th className="text-right px-3 py-3">S Net P&amp;L</th>
+              <th className="text-right px-3 py-3">#</th>
+              <th className="text-left px-3 py-3">Date</th>
+              <th className="text-left px-3 py-3 min-w-48">Market</th>
+              <th className="text-left px-3 py-3">Sport</th>
+              <th className="text-left px-3 py-3">Type</th>
+              <th className="text-left px-3 py-3">Side</th>
+              <th className="text-right px-3 py-3">Entry</th>
+              <th className="text-right px-3 py-3">Shares</th>
+              <th className="text-right px-3 py-3">Size</th>
+              <th className="text-right px-3 py-3">Exit</th>
+              <th className="text-center px-3 py-3">Outcome</th>
+              <th className="text-right px-3 py-3">P&amp;L</th>
+              <th className="text-right px-3 py-3">P&amp;L%</th>
+              <th className="text-left px-3 py-3">Notes</th>
+              <th className="text-left px-3 py-3">Fee Cat</th>
+              <th className="text-right px-3 py-3">Buy Fee</th>
+              <th className="text-right px-3 py-3">Sell Fee</th>
+              <th className="text-right px-3 py-3">Total Fee</th>
+              <th className="text-right px-3 py-3">Net P&amp;L</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/50">
