@@ -85,7 +85,7 @@ export default function App() {
           <div>
             <h1 className="text-xl font-bold">
               <span className="bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
-                Session Dashboard
+                Trading Dashboard
               </span>
             </h1>
             <p className="text-sm text-gray-500 mt-1">
