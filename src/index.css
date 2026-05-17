@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-feature-settings: "kern";
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@keyframes flash-update {
+  0% { color: rgb(52, 211, 153); }
+  100% { color: rgb(107, 114, 128); }
+}
+.animate-flash-update { animation: flash-update 2s ease-out; }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in { animation: fade-in 0.3s ease-out; }
+
+@keyframes spin-3d {
+  0%   { transform: perspective(400px) rotateY(0deg); }
+  75%  { transform: perspective(400px) rotateY(340deg); }
+  100% { transform: perspective(400px) rotateY(360deg); }
+}
+.animate-spin-3d { animation: spin-3d 8s ease-in-out infinite; }
