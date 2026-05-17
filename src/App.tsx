@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { Position, Activity, SessionStats, TradeRow, TradeLogRow } from './types';
+import type { Position, SessionStats, TradeRow, TradeLogRow } from './types';
 import { fetchPositions, fetchActivity, computeStats, buildTradeRows, buildTradeLogRows, PROXY_WALLET } from './lib/polymarket';
 
 const REFRESH_INTERVAL = 30_000;
@@ -311,7 +311,6 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
 
 export default function App() {
   const [positions, setPositions] = useState<Position[]>([]);
-  const [activity, setActivity] = useState<Activity[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [tradeRows, setTradeRows] = useState<TradeRow[]>([]);
   const [tradeLog, setTradeLog] = useState<TradeLogRow[]>([]);
@@ -326,7 +325,6 @@ export default function App() {
       setError(null);
       const [pos, act] = await Promise.all([fetchPositions(), fetchActivity()]);
       setPositions(pos);
-      setActivity(act);
       setStats(computeStats(pos, act));
       setTradeRows(buildTradeRows(pos, act));
       setTradeLog(buildTradeLogRows(pos, act));
