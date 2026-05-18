@@ -44,9 +44,13 @@ function KpiCard({ label, value, sub, color = 'default' }: {
 }
 
 function KellyView({ stats, tradeLog }: { stats: SessionStats; tradeLog: TradeLogRow[] }) {
-  const [bankroll, setBankroll] = useState(500);
-  const [winProb, setWinProb] = useState(0.90);
-  const [entryPrice, setEntryPrice] = useState(0.85);
+  const [bankroll, setBankrollRaw] = useState(() => parseFloat(localStorage.getItem('kcc_bankroll') ?? '500'));
+  const [winProb, setWinProbRaw]   = useState(() => parseFloat(localStorage.getItem('kcc_winProb')  ?? '0.90'));
+  const [entryPrice, setEntryRaw]  = useState(() => parseFloat(localStorage.getItem('kcc_entry')    ?? '0.85'));
+
+  const setBankroll  = (v: number) => { setBankrollRaw(v);  localStorage.setItem('kcc_bankroll', String(v)); };
+  const setWinProb   = (v: number) => { setWinProbRaw(v);   localStorage.setItem('kcc_winProb',  String(v)); };
+  const setEntryPrice = (v: number) => { setEntryRaw(v);    localStorage.setItem('kcc_entry',    String(v)); };
 
   // Historical stats from trade log
   const winPnls = tradeLog.filter(r => r.outcome === 'WIN' && r.pnl !== null).map(r => r.pnl!);
