@@ -43,6 +43,147 @@ function KpiCard({ label, value, sub, color = 'default' }: {
   );
 }
 
+function KellyView({ stats, tradeLog }: { stats: SessionStats; tradeLog: TradeLogRow[] }) {
+  const [bankroll, setBankroll] = useState(500);
+  const [winProb, setWinProb] = useState(0.90);
+  const [entryPrice, setEntryPrice] = useState(0.85);
+
+  // Historical stats from trade log
+  const winPnls = tradeLog.filter(r => r.outcome === 'WIN' && r.pnl !== null).map(r => r.pnl!);
+  const lossPnls = tradeLog.filter(r => r.outcome === 'LOSS' && r.pnl !== null).map(r => Math.abs(r.pnl!));
+  const avgWin  = winPnls.length  > 0 ? winPnls.reduce((a, b)  => a + b, 0) / winPnls.length  : null;
+  const avgLoss = lossPnls.length > 0 ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null;
+  const histTotal = stats.wins + stats.losses;
+  const histP = histTotal > 0 ? stats.wins / histTotal : null;
+  const histQ = histP !== null ? 1 - histP : null;
+  const histB = avgWin !== null && avgLoss !== null && avgLoss > 0 ? avgWin / avgLoss : null;
+  const histFull    = histB !== null && histP !== null && histQ !== null ? Math.max(0, (histB * histP - histQ) / histB) : null;
+  const histHalf    = histFull !== null ? histFull / 2 : null;
+  const histQuarter = histFull !== null ? histFull / 4 : null;
+
+  // Manual scenario
+  const winPerShare  = 1 - entryPrice;
+  const lossPerShare = entryPrice;
+  const bManual      = lossPerShare > 0 ? winPerShare / lossPerShare : 0;
+  const qManual      = 1 - winProb;
+  const fullKelly    = Math.max(0, (bManual * winProb - qManual) / bManual);
+  const halfKelly    = fullKelly / 2;
+  const quarterKelly = fullKelly / 4;
+  const positionSize = halfKelly * bankroll;
+
+  // Geometric growth rate table (5% increments)
+  const growthRows = Array.from({ length: 19 }, (_, i) => {
+    const f = parseFloat(((i + 1) * 0.05).toFixed(2));
+    const g = f < 1 ? winProb * Math.log(1 + bManual * f) + qManual * Math.log(1 - f) : null;
+    return { f, g };
+  });
+  const maxG = Math.max(...growthRows.map(r => r.g ?? -Infinity));
+
+  const statRow = (label: string, value: string | null, color?: string) => (
+    <div className="flex justify-between items-center py-2 border-b border-gray-800/60">
+      <span className="text-xs text-gray-400">{label}</span>
+      <span className={`text-sm font-medium tabular-nums ${color ?? 'text-gray-200'}`}>{value ?? '—'}</span>
+    </div>
+  );
+
+  const inputRow = (label: string, value: number, onChange: (v: number) => void, step = 0.01, min = 0, max = 1) => (
+    <div className="flex justify-between items-center py-2 border-b border-gray-800/60">
+      <span className="text-xs text-gray-400">{label}</span>
+      <input
+        type="number" value={value} step={step} min={min} max={max}
+        onChange={e => onChange(parseFloat(e.target.value) || 0)}
+        className="w-24 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-right tabular-nums text-white focus:outline-none focus:border-blue-500"
+      />
+    </div>
+  );
+
+  return (
+    <div className="animate-fade-in space-y-6">
+      <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+        Kelly Criterion Calculator
+      </h2>
+
+      {/* Top two-column layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+        {/* Left — Historical Kelly */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-1">
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Your Trade Data</div>
+          {statRow('Total Trades', String(histTotal))}
+          {statRow('Win Probability (p)', histP !== null ? fmtPct(histP) : null, 'text-emerald-400')}
+          {statRow('Loss Probability (q)', histQ !== null ? fmtPct(histQ) : null, 'text-red-400')}
+          {statRow('Average Win', avgWin !== null ? fmt$abs(avgWin) : null, 'text-emerald-400')}
+          {statRow('Average Loss', avgLoss !== null ? fmt$abs(avgLoss) : null, 'text-red-400')}
+          {statRow('b (Win/Loss ratio)', histB !== null ? histB.toFixed(3) : null)}
+
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mt-4 mb-2 pt-2">Kelly Sizing</div>
+          {statRow('Full Kelly (f*)', histFull !== null ? fmtPct(histFull) : null)}
+          {statRow('Half-Kelly (recommended)', histHalf !== null ? fmtPct(histHalf) : null, 'text-blue-400')}
+          {statRow('Quarter-Kelly (conservative)', histQuarter !== null ? fmtPct(histQuarter) : null, 'text-gray-300')}
+          {histFull === null && (
+            <p className="text-xs text-gray-600 mt-2 italic">Kelly sizing requires at least one loss to compute b.</p>
+          )}
+        </div>
+
+        {/* Right — Manual Scenario */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-1">
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Manual Scenario Calculator</div>
+          {inputRow('Bankroll (USDC)', bankroll, setBankroll, 10, 1, 100000)}
+          {inputRow('Win Probability', winProb, setWinProb, 0.01, 0.01, 0.99)}
+          {inputRow('Entry Price (¢)', entryPrice, setEntryPrice, 0.01, 0.01, 0.99)}
+
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mt-4 mb-2 pt-2">Results</div>
+          {statRow('Win per Share', winPerShare.toFixed(4))}
+          {statRow('Loss per Share', lossPerShare.toFixed(4))}
+          {statRow('b (Win/Loss)', bManual.toFixed(4))}
+          {statRow('Full Kelly f*', fmtPct(fullKelly))}
+          {statRow('Half-Kelly f*', fmtPct(halfKelly), 'text-blue-400')}
+          {statRow('Quarter-Kelly f*', fmtPct(quarterKelly), 'text-gray-300')}
+          {statRow('Half-Kelly Position', fmt$abs(positionSize), positionSize > 0 ? 'text-emerald-400' : 'text-gray-400')}
+        </div>
+      </div>
+
+      {/* Growth Rate Table */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+          Geometric Growth Rate by Bet Size
+          <span className="normal-case font-normal text-gray-600 ml-2">(based on manual scenario)</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-gray-500 text-xs uppercase tracking-wider border-b border-gray-800">
+                <th className="text-left py-2 pr-4">Bet Size (% Bankroll)</th>
+                <th className="text-right py-2 pr-4">Position (USDC)</th>
+                <th className="text-right py-2">Geometric Growth Rate</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/40">
+              {growthRows.map(({ f, g }) => {
+                const isOptimal = g !== null && Math.abs(g - maxG) < 0.0000001 && maxG > 0;
+                const isHalf = Math.abs(f - halfKelly) < 0.025;
+                return (
+                  <tr key={f} className={`${isOptimal ? 'bg-emerald-500/10' : isHalf ? 'bg-blue-500/5' : ''}`}>
+                    <td className="py-1.5 pr-4 tabular-nums text-gray-300">
+                      {(f * 100).toFixed(0)}%
+                      {isOptimal && <span className="ml-2 text-xs text-emerald-400">← optimal</span>}
+                      {isHalf && !isOptimal && <span className="ml-2 text-xs text-blue-400">← ½-Kelly</span>}
+                    </td>
+                    <td className="py-1.5 pr-4 text-right tabular-nums text-gray-400">{fmt$abs(f * bankroll)}</td>
+                    <td className={`py-1.5 text-right tabular-nums font-medium ${g === null ? 'text-gray-600' : g >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {g === null ? '—' : (g * 100).toFixed(4) + '%'}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: SessionStats }) {
   return (
     <section className="animate-fade-in">
@@ -312,7 +453,7 @@ export default function App() {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [tradeRows, setTradeRows] = useState<TradeRow[]>([]);
   const [tradeLog, setTradeLog] = useState<TradeLogRow[]>([]);
-  const [view, setView] = useState<'dashboard' | 'tradelog'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'tradelog' | 'kelly'>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -367,6 +508,16 @@ export default function App() {
             >
               Trade Log
             </button>
+            <button
+              onClick={() => setView(v => v === 'kelly' ? 'dashboard' : 'kelly')}
+              className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                view === 'kelly'
+                  ? 'bg-blue-600 border-blue-500 text-white'
+                  : 'bg-gray-800/50 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`}
+            >
+              KCC
+            </button>
             {lastUpdated && (
               <span
                 key={lastUpdated.getTime()}
@@ -405,6 +556,8 @@ export default function App() {
         ) : stats ? (
           view === 'tradelog'
             ? <TradeLogView tradeLog={tradeLog} stats={stats} />
+            : view === 'kelly'
+            ? <KellyView stats={stats} tradeLog={tradeLog} />
             : <DashboardView positions={positions} tradeRows={tradeRows} stats={stats} />
         ) : null}
       </main>
