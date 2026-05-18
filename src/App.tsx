@@ -44,13 +44,34 @@ function KpiCard({ label, value, sub, color = 'default' }: {
 }
 
 function KellyView({ stats, tradeLog }: { stats: SessionStats; tradeLog: TradeLogRow[] }) {
-  const [bankroll, setBankrollRaw] = useState(() => parseFloat(localStorage.getItem('kcc_bankroll') ?? '500'));
-  const [winProb, setWinProbRaw]   = useState(() => parseFloat(localStorage.getItem('kcc_winProb')  ?? '0.90'));
-  const [entryPrice, setEntryRaw]  = useState(() => parseFloat(localStorage.getItem('kcc_entry')    ?? '0.85'));
+  const [bankroll,    setBankrollRaw]  = useState(500);
+  const [winProb,     setWinProbRaw]   = useState(0.90);
+  const [entryPrice,  setEntryRaw]     = useState(0.85);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const setBankroll  = (v: number) => { setBankrollRaw(v);  localStorage.setItem('kcc_bankroll', String(v)); };
-  const setWinProb   = (v: number) => { setWinProbRaw(v);   localStorage.setItem('kcc_winProb',  String(v)); };
-  const setEntryPrice = (v: number) => { setEntryRaw(v);    localStorage.setItem('kcc_entry',    String(v)); };
+  // Load settings from server on mount
+  useEffect(() => {
+    fetch('/api/settings').then(r => r.json()).then(d => {
+      if (d.bankroll)    setBankrollRaw(d.bankroll);
+      if (d.winProb)     setWinProbRaw(d.winProb);
+      if (d.entryPrice)  setEntryRaw(d.entryPrice);
+    }).catch(() => {});
+  }, []);
+
+  const persist = (b: number, w: number, e: number) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankroll: b, winProb: w, entryPrice: e }),
+      }).catch(() => {});
+    }, 600);
+  };
+
+  const setBankroll   = (v: number) => { setBankrollRaw(v);  persist(v, winProb, entryPrice); };
+  const setWinProb    = (v: number) => { setWinProbRaw(v);   persist(bankroll, v, entryPrice); };
+  const setEntryPrice = (v: number) => { setEntryRaw(v);     persist(bankroll, winProb, v); };
 
   // Historical stats from trade log
   const winPnls = tradeLog.filter(r => r.outcome === 'WIN' && r.pnl !== null).map(r => r.pnl!);
