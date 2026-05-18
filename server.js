@@ -45,7 +45,7 @@ app.use('/api/data', async (req, res) => {
 });
 
 // SPA fallback
-app.get('*', (req, res) => {
+app.use((req, res) => {
   res.sendFile(join(import.meta.dirname, 'dist', 'index.html'));
 });
 
