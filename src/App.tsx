@@ -254,7 +254,11 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
                 </td>
                 <td className="px-3 py-2.5 text-gray-400">{row.sport}</td>
                 <td className="px-3 py-2.5">
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${row.type === 'Latency Arb' ? 'text-purple-400 bg-purple-500/10' : 'text-orange-400 bg-orange-500/10'}`}>
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    row.type === 'Latency Arb' ? 'text-purple-400 bg-purple-500/10' :
+                    row.type === 'Paper'        ? 'text-cyan-400 bg-cyan-500/10' :
+                                                  'text-orange-400 bg-orange-500/10'
+                  }`}>
                     {row.type}
                   </span>
                 </td>
