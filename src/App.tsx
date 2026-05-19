@@ -209,7 +209,7 @@ function KellyView({ stats, tradeLog }: { stats: SessionStats; tradeLog: TradeLo
   );
 }
 
-function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: SessionStats }) {
+function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
   return (
     <section className="animate-fade-in">
       <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
@@ -291,25 +291,43 @@ function TradeLogView({ tradeLog, stats }: { tradeLog: TradeLogRow[]; stats: Ses
             ))}
           </tbody>
           <tfoot>
-            <tr className="bg-gray-900 border-t border-gray-700">
-              <td colSpan={10} className="px-3 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
-              <td className={`px-3 py-3 text-right tabular-nums font-bold ${stats.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {fmt$(stats.totalPnl)}
-              </td>
-              <td />
-              <td />
-              <td />
-              <td className="px-3 py-3 text-right tabular-nums font-bold text-gray-400 text-xs">
-                {fmt$abs(stats.totalFees)}
-              </td>
-              <td />
-              <td className="px-3 py-3 text-right tabular-nums font-bold text-xs">
-                {fmt$abs(stats.totalFees)}
-              </td>
-              <td className={`px-3 py-3 text-right tabular-nums font-bold text-xs ${stats.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {fmt$(stats.netPnl)}
-              </td>
-            </tr>
+            {(() => {
+              const rowPnl      = tradeLog.reduce((s, r) => s + (r.pnl      ?? 0), 0);
+              const rowBuyFee   = tradeLog.reduce((s, r) => s + r.buyFee,           0);
+              const rowSellFee  = tradeLog.reduce((s, r) => s + r.sellFee,          0);
+              const rowTotalFee = tradeLog.reduce((s, r) => s + r.totalFees,        0);
+              const rowNetPnl   = tradeLog.reduce((s, r) => s + (r.netPnl   ?? 0), 0);
+              return (
+                <tr className="bg-gray-900 border-t border-gray-700">
+                  {/* cols 1–11: # … Outcome */}
+                  <td colSpan={11} className="px-3 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
+                  {/* col 12: P&L */}
+                  <td className={`px-3 py-3 text-right tabular-nums font-bold ${rowPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmt$(rowPnl)}
+                  </td>
+                  {/* col 13: P&L% — blank */}
+                  <td />
+                  {/* col 14: Fee Cat — blank */}
+                  <td />
+                  {/* col 15: Buy Fee */}
+                  <td className="px-3 py-3 text-right tabular-nums font-bold text-gray-400 text-xs">
+                    {fmt$abs(rowBuyFee)}
+                  </td>
+                  {/* col 16: Sell Fee */}
+                  <td className="px-3 py-3 text-right tabular-nums font-bold text-gray-400 text-xs">
+                    {fmt$abs(rowSellFee)}
+                  </td>
+                  {/* col 17: Total Fee */}
+                  <td className="px-3 py-3 text-right tabular-nums font-bold text-gray-400 text-xs">
+                    {fmt$abs(rowTotalFee)}
+                  </td>
+                  {/* col 18: Net P&L */}
+                  <td className={`px-3 py-3 text-right tabular-nums font-bold text-xs ${rowNetPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmt$(rowNetPnl)}
+                  </td>
+                </tr>
+              );
+            })()}
           </tfoot>
         </table>
       </div>
@@ -457,10 +475,10 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
             <tfoot>
               <tr className="bg-gray-900 border-t border-gray-700">
                 <td colSpan={6} className="px-4 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
-                <td className={`px-4 py-3 text-right tabular-nums font-bold ${stats.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {fmt$(stats.totalPnl)}
+                <td className={`px-4 py-3 text-right tabular-nums font-bold ${(tradeRows.at(-1)?.cumulative ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {fmt$(tradeRows.at(-1)?.cumulative ?? 0)}
                 </td>
-                <td className={`px-4 py-3 text-right tabular-nums font-bold ${stats.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                <td className={`px-4 py-3 text-right tabular-nums font-bold ${(tradeRows.at(-1)?.cumulative ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                   {fmt$(tradeRows.at(-1)?.cumulative ?? 0)}
                 </td>
                 <td />
@@ -488,9 +506,14 @@ export default function App() {
     try {
       setError(null);
       const [pos, act] = await Promise.all([fetchPositions(), fetchActivity()]);
+      const rows = buildTradeRows(pos, act);
+      const rawStats = computeStats(pos, act);
+      // Use buildTradeRows as the single source of truth for P&L totals so that
+      // the KPI cards, Running P&L footer, and Trade Log footer all agree.
+      const buildPnl = rows.at(-1)?.cumulative ?? 0;
       setPositions(pos);
-      setStats(computeStats(pos, act));
-      setTradeRows(buildTradeRows(pos, act));
+      setStats({ ...rawStats, totalPnl: buildPnl, netPnl: buildPnl - rawStats.totalFees });
+      setTradeRows(rows);
       setTradeLog(buildTradeLogRows(pos, act));
       setLastUpdated(new Date());
     } catch (e) {
@@ -580,7 +603,7 @@ export default function App() {
           </div>
         ) : stats ? (
           view === 'tradelog'
-            ? <TradeLogView tradeLog={tradeLog} stats={stats} />
+            ? <TradeLogView tradeLog={tradeLog} />
             : view === 'kelly'
             ? <KellyView stats={stats} tradeLog={tradeLog} />
             : <DashboardView positions={positions} tradeRows={tradeRows} stats={stats} />

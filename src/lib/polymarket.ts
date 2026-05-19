@@ -26,27 +26,34 @@ export function computeStats(positions: Position[], activity: Activity[]): Sessi
   for (const b of buys) buyCost[b.conditionId] = (buyCost[b.conditionId] ?? 0) + b.usdcSize;
 
   // Realised P&L from winning redemptions
+  // Build redeemedIds first — needed to guard against double-counting below
+  const redeemedIds = new Set(redeems.map(r => r.conditionId));
   const redeemedPnl = redeems.reduce(
     (sum, r) => sum + r.usdcSize - (buyCost[r.conditionId] ?? 0), 0
   );
 
   // Realised P&L from early sells
+  // Skip any conditionId that was also redeemed: those trades had a partial sell
+  // followed by a full redemption. Counting the sell here would charge the full
+  // buy cost twice (once in sellPnl, once in redeemedPnl), inflating the loss.
   const soldMap: Record<string, number> = {};
   for (const s of sells) soldMap[s.conditionId] = (soldMap[s.conditionId] ?? 0) + s.usdcSize;
   const sellPnl = Object.entries(soldMap).reduce(
-    (sum, [cid, received]) => sum + received - (buyCost[cid] ?? 0), 0
+    (sum, [cid, received]) => redeemedIds.has(cid)
+      ? sum  // partial sell before redemption — redeemedPnl covers this trade
+      : sum + received - (buyCost[cid] ?? 0),
+    0
   );
 
   const unrealizedPnl  = positions.reduce((sum, p) => sum + p.cashPnl, 0);
   const portfolioValue = positions.reduce((sum, p) => sum + p.currentValue, 0);
 
   // Win counting: definitive (REDEEM) + probable (curPrice ≥ 0.998)
-  const redeemedIds = new Set(redeems.map(r => r.conditionId));
   const resolvedWins  = redeems.length;
   const probableWins  = positions.filter(p => p.curPrice >= 0.998 && !redeemedIds.has(p.conditionId)).length;
   const totalWins     = resolvedWins + probableWins;
   const totalLosses   = Object.entries(soldMap).filter(
-    ([cid, received]) => received < (buyCost[cid] ?? 0)
+    ([cid, received]) => !redeemedIds.has(cid) && received < (buyCost[cid] ?? 0)
   ).length;
 
   const totalRealizedPnl = redeemedPnl + sellPnl;
