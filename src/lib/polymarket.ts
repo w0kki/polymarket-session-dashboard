@@ -75,7 +75,7 @@ export function computeStats(positions: Position[], activity: Activity[]): Sessi
   const largestWin  = allPnls.length ? Math.max(...allPnls) : 0;
   const largestLoss = allPnls.length ? Math.min(...allPnls) : 0;
 
-  const n = buys.length;
+  const n = new Set(buys.map(b => b.conditionId)).size; // unique markets, not raw transactions
   return {
     totalTrades: n,
     portfolioValue,
