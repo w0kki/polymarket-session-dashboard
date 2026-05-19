@@ -166,8 +166,8 @@ export function buildTradeLogRows(positions: Position[], activity: Activity[]): 
 
     if (redeemedMap[cid] !== undefined) {
       exit    = 1.00;
-      outcome = 'WIN';
       pnl     = redeemedMap[cid] - cost;
+      outcome = pnl >= 0 ? 'WIN' : 'LOSS'; // redeemed but sold too many shares cheaply first
     } else if (posMap[cid]) {
       const pos = posMap[cid];
       if (pos.curPrice >= 0.998) {
@@ -258,8 +258,8 @@ export function buildTradeRows(positions: Position[], activity: Activity[]): Tra
     let status: TradeRow['status'];
 
     if (redeemedMap[b.conditionId] !== undefined) {
-      pnl = redeemedMap[b.conditionId] - cost;
-      status = 'WIN';
+      pnl    = redeemedMap[b.conditionId] - cost;
+      status = pnl >= 0 ? 'WIN' : 'LOSS'; // redeemed but sold too many shares cheaply first
     } else if (posMap[b.conditionId]) {
       const pos = posMap[b.conditionId];
       pnl = pos.cashPnl;
