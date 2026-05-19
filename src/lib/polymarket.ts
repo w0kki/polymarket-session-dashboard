@@ -48,13 +48,17 @@ export function computeStats(positions: Position[], activity: Activity[]): Sessi
   const unrealizedPnl  = positions.reduce((sum, p) => sum + p.cashPnl, 0);
   const portfolioValue = positions.reduce((sum, p) => sum + p.currentValue, 0);
 
-  // Win counting: definitive (REDEEM) + probable (curPrice ≥ 0.998)
-  const resolvedWins  = redeems.length;
+  // Win counting: definitive (REDEEM where net pnl ≥ 0) + probable (curPrice ≥ 0.998)
+  // A redemption means the market resolved in your favour, but a partial sell before
+  // resolution can make the net pnl negative — that is a loss, not a win.
+  const resolvedWins  = redeems.filter(r => r.usdcSize >= (buyCost[r.conditionId] ?? 0)).length;
   const probableWins  = positions.filter(p => p.curPrice >= 0.998 && !redeemedIds.has(p.conditionId)).length;
   const totalWins     = resolvedWins + probableWins;
-  const totalLosses   = Object.entries(soldMap).filter(
+  const redeemLosses  = redeems.filter(r => r.usdcSize < (buyCost[r.conditionId] ?? 0)).length;
+  const sellLosses    = Object.entries(soldMap).filter(
     ([cid, received]) => !redeemedIds.has(cid) && received < (buyCost[cid] ?? 0)
   ).length;
+  const totalLosses   = redeemLosses + sellLosses;
 
   const totalRealizedPnl = redeemedPnl + sellPnl;
   const totalPnl = totalRealizedPnl + unrealizedPnl;
