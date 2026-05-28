@@ -141,7 +141,7 @@ function KellyView({ stats, tradeLog }: { stats: SessionStats; tradeLog: TradeLo
 
   // Historical stats from trade log
   const winPnls = tradeLog.filter(r => r.outcome === 'WIN' && r.pnl !== null).map(r => r.pnl!);
-  const lossPnls = tradeLog.filter(r => r.outcome === 'LOSS' && r.pnl !== null).map(r => Math.abs(r.pnl!));
+  const lossPnls = tradeLog.filter(r => (r.outcome === 'LOSS' || r.outcome === 'STOP_LOSS') && r.pnl !== null).map(r => Math.abs(r.pnl!));
   const avgWin  = winPnls.length  > 0 ? winPnls.reduce((a, b)  => a + b, 0) / winPnls.length  : null;
   const avgLoss = lossPnls.length > 0 ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null;
   const histTotal = stats.wins + stats.losses;
@@ -349,6 +349,8 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
                     <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">WIN</span>
                   ) : row.outcome === 'LOSS' ? (
                     <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">LOSS</span>
+                  ) : row.outcome === 'STOP_LOSS' ? (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30">STOP</span>
                   ) : (
                     <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-500/15 text-gray-500 border border-gray-500/30">—</span>
                   )}
@@ -415,23 +417,24 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
 }
 
 function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
-  const resolved  = paperTrades.filter(r => r.outcome === 'WIN' || r.outcome === 'LOSS');
+  const resolved  = paperTrades.filter(r => r.outcome === 'WIN' || r.outcome === 'LOSS' || r.outcome === 'STOP_LOSS');
   const open      = paperTrades.filter(r => r.outcome === 'NA');
   const wins      = resolved.filter(r => r.outcome === 'WIN').length;
-  const losses    = resolved.filter(r => r.outcome === 'LOSS').length;
+  const losses    = resolved.filter(r => r.outcome === 'LOSS' || r.outcome === 'STOP_LOSS').length;
   const winRate   = resolved.length > 0 ? wins / resolved.length : 0;
-  const totalPnl  = resolved.reduce((s, r) => s + (r.pnl ?? 0), 0);
-  const totalFees = paperTrades.reduce((s, r) => s + r.totalFees, 0);
-  const netPnl    = totalPnl - totalFees;
+  const totalPnl  = resolved.reduce((s, r) => s + (r.netPnl ?? r.pnl ?? 0), 0);
+  const totalFees = resolved.reduce((s, r) => s + r.totalFees, 0);
+  const netPnl    = totalPnl;
   const portfolioValue = open.reduce((s, r) => s + r.size, 0);
-  const largestWin  = resolved.filter(r => r.outcome === 'WIN').reduce((m, r) => Math.max(m, r.pnl ?? 0), 0);
-  const largestLoss = resolved.filter(r => r.outcome === 'LOSS').reduce((m, r) => Math.min(m, r.pnl ?? 0), 0);
+  const largestWin  = resolved.filter(r => r.outcome === 'WIN').reduce((m, r) => Math.max(m, r.netPnl ?? r.pnl ?? 0), 0);
+  const largestLoss = resolved.filter(r => r.outcome === 'LOSS' || r.outcome === 'STOP_LOSS').reduce((m, r) => Math.min(m, r.netPnl ?? r.pnl ?? 0), 0);
   const avgReturn   = resolved.length > 0 ? totalPnl / resolved.length : 0;
   const avgFee      = paperTrades.length > 0 ? totalFees / paperTrades.length : 0;
 
   let cumulative = 0;
   const runningRows: TradeRow[] = resolved.map((r, i) => {
-    cumulative += r.pnl ?? 0;
+    const tradePnl = r.netPnl ?? r.pnl ?? 0;
+    cumulative += tradePnl;
     return {
       index: i + 1,
       title: r.market,
@@ -439,7 +442,7 @@ function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
       size: r.shares,
       price: r.entry,
       cost: r.size,
-      pnl: r.pnl ?? 0,
+      pnl: tradePnl,
       cumulative,
       status: r.outcome === 'WIN' ? 'WIN' : 'LOSS',
       timestamp: 0,
@@ -639,71 +642,95 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
       </div>
 
       {/* Active Positions */}
-      <section className="animate-fade-in">
-        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
-          Active Positions ({positions.length})
-        </h2>
-        <div className="rounded-xl border border-gray-800 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
-                <th className="text-left px-4 py-3">Market</th>
-                <th className="text-left px-4 py-3">Outcome</th>
-                <th className="text-right px-4 py-3">Shares</th>
-                <th className="text-right px-4 py-3">Avg</th>
-                <th className="text-right px-4 py-3">Current</th>
-                <th className="text-right px-4 py-3">Value</th>
-                <th className="text-right px-4 py-3">P&L</th>
-                <th className="text-right px-4 py-3">P&L%</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800/50">
-              {positions.map((p, i) => {
-                const isResolved = p.curPrice >= 0.998;
-                return (
-                  <tr key={i} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        {p.icon && (
-                          <img src={p.icon} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
-                        )}
-                        {p.slug ? (
-                          <a
-                            href={`https://polymarket.com/event/${p.slug}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-gray-200 leading-tight line-clamp-1 hover:text-blue-400 hover:underline transition-colors"
-                          >{p.title}</a>
-                        ) : (
-                          <span className="text-gray-200 leading-tight line-clamp-1">{p.title}</span>
-                        )}
-                        {isResolved && (
-                          <span className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full shrink-0">
-                            Resolved ✓
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-blue-300">{p.outcome}</td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-300">{p.size.toFixed(1)}</td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmtCents(p.avgPrice)}</td>
-                    <td className={`px-4 py-3 text-right tabular-nums font-medium ${isResolved ? 'text-emerald-400' : 'text-gray-300'}`}>
-                      {fmtCents(p.curPrice)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-200">{fmt$abs(p.currentValue)}</td>
-                    <td className={`px-4 py-3 text-right tabular-nums font-medium ${p.cashPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {fmt$(p.cashPnl)}
-                    </td>
-                    <td className={`px-4 py-3 text-right tabular-nums ${p.percentPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {p.percentPnl >= 0 ? '+' : ''}{p.percentPnl.toFixed(1)}%
-                    </td>
+      {(() => {
+        // Split positions into three buckets:
+        //   open     — genuinely in-play (0.001 < curPrice < 0.998)
+        //   resolved — settled as WIN (curPrice ≥ 0.998)
+        //   dead     — token went to zero, awaiting official settlement
+        const open     = positions.filter(p => p.curPrice > 0.001 && p.curPrice < 0.998);
+        const resolved = positions.filter(p => p.curPrice >= 0.998);
+        const dead     = positions.filter(p => p.curPrice <= 0.001);
+        const visible  = [...resolved, ...open]; // wins first, then in-play
+
+        const renderRow = (p: Position, i: number) => {
+          const isResolved = p.curPrice >= 0.998;
+          return (
+            <tr key={i} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
+              <td className="px-4 py-3">
+                <div className="flex items-center gap-2">
+                  {p.icon && (
+                    <img src={p.icon} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
+                  )}
+                  {p.slug ? (
+                    <a
+                      href={`https://polymarket.com/event/${p.slug}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-gray-200 leading-tight line-clamp-1 hover:text-blue-400 hover:underline transition-colors"
+                    >{p.title}</a>
+                  ) : (
+                    <span className="text-gray-200 leading-tight line-clamp-1">{p.title}</span>
+                  )}
+                  {isResolved && (
+                    <span className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full shrink-0">
+                      Resolved ✓
+                    </span>
+                  )}
+                </div>
+              </td>
+              <td className="px-4 py-3 text-blue-300">{p.outcome}</td>
+              <td className="px-4 py-3 text-right tabular-nums text-gray-300">{p.size.toFixed(1)}</td>
+              <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmtCents(p.avgPrice)}</td>
+              <td className={`px-4 py-3 text-right tabular-nums font-medium ${isResolved ? 'text-emerald-400' : 'text-gray-300'}`}>
+                {fmtCents(p.curPrice)}
+              </td>
+              <td className="px-4 py-3 text-right tabular-nums text-gray-200">{fmt$abs(p.currentValue)}</td>
+              <td className={`px-4 py-3 text-right tabular-nums font-medium ${p.cashPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {fmt$(p.cashPnl)}
+              </td>
+              <td className={`px-4 py-3 text-right tabular-nums ${p.percentPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {p.percentPnl >= 0 ? '+' : ''}{p.percentPnl.toFixed(1)}%
+              </td>
+            </tr>
+          );
+        };
+
+        return (
+          <section className="animate-fade-in">
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
+              Active Positions ({visible.length})
+              {dead.length > 0 && (
+                <span className="ml-2 text-xs text-red-500/70 normal-case tracking-normal font-normal">
+                  +{dead.length} pending settlement at 0¢
+                </span>
+              )}
+            </h2>
+            <div className="rounded-xl border border-gray-800 overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
+                    <th className="text-left px-4 py-3">Market</th>
+                    <th className="text-left px-4 py-3">Outcome</th>
+                    <th className="text-right px-4 py-3">Shares</th>
+                    <th className="text-right px-4 py-3">Avg</th>
+                    <th className="text-right px-4 py-3">Current</th>
+                    <th className="text-right px-4 py-3">Value</th>
+                    <th className="text-right px-4 py-3">P&L</th>
+                    <th className="text-right px-4 py-3">P&L%</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
+                </thead>
+                <tbody className="divide-y divide-gray-800/50">
+                  {visible.length > 0
+                    ? visible.map(renderRow)
+                    : <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-600 text-xs">No open positions</td></tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+      })()}
+
 
       {/* Running P&L */}
       <section className="animate-fade-in">
