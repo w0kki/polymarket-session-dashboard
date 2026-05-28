@@ -64,6 +64,7 @@ func (d *DB) GetTradeStats() (*TradeStats, error) {
 			AVG(CASE WHEN outcome = 'LOSS' AND pnl IS NOT NULL THEN ABS(pnl) END)
 		FROM trades
 		WHERE outcome IN ('WIN', 'LOSS')
+		  AND trade_type = 'Paper'
 	`)
 
 	var wins, losses sql.NullInt64

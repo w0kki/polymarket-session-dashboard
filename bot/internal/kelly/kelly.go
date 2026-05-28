@@ -12,6 +12,12 @@ type Result struct {
 	Computed     bool    // false if not enough data to compute
 }
 
+// minLossesForKelly is the minimum number of resolved losses required before
+// trusting the Kelly computation. Below this threshold the sample variance is
+// too high and Kelly will frequently land at zero or negative even for a
+// genuinely profitable strategy — so we fall back to the fixed fallback size.
+const minLossesForKelly = 20
+
 // Compute calculates the Kelly fraction from historical trade stats.
 //
 //   b = avgWin / avgLoss   (win-to-loss ratio)
@@ -19,13 +25,19 @@ type Result struct {
 //   q = 1 − p
 //   f* = (b·p − q) / b
 //
-// Returns Computed=false and falls back to fallbackSize when there are
-// fewer than 1 loss (b cannot be computed without a loss).
+// Returns Computed=false and falls back to fallbackSize when:
+//   - fewer than minLossesForKelly losses recorded (insufficient sample)
+//   - avgLoss or avgWin are zero/missing
+//   - computed Kelly fraction is ≤ 0 (no statistical edge yet)
 func Compute(wins, losses int, avgWin, avgLoss, bankroll, maxSize, fallbackSize float64) Result {
-	if losses < 1 || avgLoss <= 0 || avgWin <= 0 {
-		// Not enough loss data yet — use the configured fallback size.
+	fallback := func() Result {
 		size := math.Min(fallbackSize, maxSize)
 		return Result{PositionSize: size, Computed: false}
+	}
+
+	if losses < minLossesForKelly || avgLoss <= 0 || avgWin <= 0 {
+		// Not enough loss data yet — use the configured fallback size.
+		return fallback()
 	}
 
 	b := avgWin / avgLoss
@@ -34,8 +46,10 @@ func Compute(wins, losses int, avgWin, avgLoss, bankroll, maxSize, fallbackSize 
 
 	full := (b*p - q) / b
 	if full <= 0 {
-		// Negative Kelly means no edge — don't bet.
-		return Result{FullKelly: 0, HalfKelly: 0, PositionSize: 0, Computed: true}
+		// Negative or zero Kelly: strategy shows no statistical edge yet.
+		// Fall back to fixed size rather than halting — the sample may be
+		// too small or skewed by outlier losses.
+		return fallback()
 	}
 
 	half := full / 2
