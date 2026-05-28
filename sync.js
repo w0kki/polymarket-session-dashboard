@@ -124,6 +124,13 @@ function buildTradeRows(positions, activity) {
         exit    = 1.00;
         outcome = 'WIN';
         pnl     = pos.cashPnl;
+      } else if (pos.curPrice <= 0.001) {
+        // Token went to zero — market resolved against us but position hasn't
+        // disappeared from the API yet (Polymarket sometimes leaves 0¢ positions
+        // visible for days while waiting for official settlement).
+        exit    = 0.0;
+        outcome = 'LOSS';
+        pnl     = -cost;
       } else {
         exit    = null;
         outcome = 'NA';
