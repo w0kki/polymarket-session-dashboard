@@ -210,7 +210,15 @@ export function setSetting(key, value) {
 
 export function getAllSettings() {
   const rows = db.prepare('SELECT key, value FROM settings').all();
-  return Object.fromEntries(rows.map(r => [r.key, JSON.parse(r.value)]));
+  const out = {};
+  for (const r of rows) {
+    try {
+      out[r.key] = JSON.parse(r.value);
+    } catch {
+      out[r.key] = r.value; // Go bot writes raw strings — fall back gracefully
+    }
+  }
+  return out;
 }
 
 // ─── Sync log ────────────────────────────────────────────────────────────────
