@@ -199,21 +199,23 @@ type telegramChannel struct {
 }
 
 func (t *telegramChannel) sendPlain(text string) {
-	t.post(map[string]string{
-		"chat_id": t.chatID,
-		"text":    text,
+	t.post(map[string]interface{}{
+		"chat_id":                  t.chatID,
+		"text":                     text,
+		"disable_web_page_preview": true,
 	})
 }
 
 func (t *telegramChannel) sendHTML(html string) {
-	t.post(map[string]string{
-		"chat_id":    t.chatID,
-		"text":       html,
-		"parse_mode": "HTML",
+	t.post(map[string]interface{}{
+		"chat_id":                  t.chatID,
+		"text":                     html,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": true,
 	})
 }
 
-func (t *telegramChannel) post(payload map[string]string) {
+func (t *telegramChannel) post(payload map[string]interface{}) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
 	body, _ := json.Marshal(payload)
 	resp, err := t.client.Post(url, "application/json", bytes.NewReader(body))
