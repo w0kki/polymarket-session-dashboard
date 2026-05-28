@@ -196,6 +196,7 @@ type PaperTrade struct {
 type OpenPaperTrade struct {
 	ConditionID string
 	Market      string  // human-readable title
+	Slug        string  // Polymarket event slug — used to build clickable links
 	Sport       string
 	Side        string  // outcome label the bot bet on
 	EntryPrice  float64
@@ -207,8 +208,9 @@ type OpenPaperTrade struct {
 // GetOpenPaperTrades returns all paper trades still awaiting resolution.
 func (d *DB) GetOpenPaperTrades() ([]OpenPaperTrade, error) {
 	rows, err := d.conn.Query(`
-		SELECT condition_id, COALESCE(market,''), COALESCE(sport,''),
-		       side, COALESCE(entry_price,0), shares, size_usdc, COALESCE(buy_fee, 0)
+		SELECT condition_id, COALESCE(market,''), COALESCE(slug,''),
+		       COALESCE(sport,''), side, COALESCE(entry_price,0),
+		       shares, size_usdc, COALESCE(buy_fee, 0)
 		FROM trades
 		WHERE trade_type = 'Paper' AND outcome = 'NA'
 	`)
@@ -220,7 +222,7 @@ func (d *DB) GetOpenPaperTrades() ([]OpenPaperTrade, error) {
 	var out []OpenPaperTrade
 	for rows.Next() {
 		var t OpenPaperTrade
-		if err := rows.Scan(&t.ConditionID, &t.Market, &t.Sport,
+		if err := rows.Scan(&t.ConditionID, &t.Market, &t.Slug, &t.Sport,
 			&t.Side, &t.EntryPrice, &t.Shares, &t.SizeUSDC, &t.BuyFee); err != nil {
 			return nil, err
 		}
@@ -328,8 +330,9 @@ func (d *DB) InsertLiveTrade(t PaperTrade) error {
 // GetOpenLiveTrades returns all real (non-paper) trades still awaiting resolution.
 func (d *DB) GetOpenLiveTrades() ([]OpenPaperTrade, error) {
 	rows, err := d.conn.Query(`
-		SELECT condition_id, COALESCE(market,''), COALESCE(sport,''),
-		       side, COALESCE(entry_price,0), shares, size_usdc, COALESCE(buy_fee, 0)
+		SELECT condition_id, COALESCE(market,''), COALESCE(slug,''),
+		       COALESCE(sport,''), side, COALESCE(entry_price,0),
+		       shares, size_usdc, COALESCE(buy_fee, 0)
 		FROM trades
 		WHERE trade_type IN ('Risk Premia', 'Latency Arb') AND outcome = 'NA'
 	`)
@@ -341,7 +344,7 @@ func (d *DB) GetOpenLiveTrades() ([]OpenPaperTrade, error) {
 	var out []OpenPaperTrade
 	for rows.Next() {
 		var t OpenPaperTrade
-		if err := rows.Scan(&t.ConditionID, &t.Market, &t.Sport,
+		if err := rows.Scan(&t.ConditionID, &t.Market, &t.Slug, &t.Sport,
 			&t.Side, &t.EntryPrice, &t.Shares, &t.SizeUSDC, &t.BuyFee); err != nil {
 			return nil, err
 		}

@@ -276,7 +276,7 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 			log.Printf("[poll] order failed for %s: %v", opp.ConditionID[:12], err)
 			continue
 		}
-		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Price, opp.SizeUSDC)
+		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Slug, opp.Price, opp.SizeUSDC)
 	}
 }
 
@@ -417,7 +417,7 @@ func checkPaperStopLoss(ctx context.Context, cfg *config.Config, database *db.DB
 		log.Printf("[stoploss/paper] DB update failed %s: %v", t.ConditionID[:12], err)
 		return
 	}
-	n.StopLossTriggered(t.Market, t.Side, t.Sport, price, netPnl, saved)
+	n.StopLossTriggered(t.Market, t.Side, t.Sport, t.Slug, price, netPnl, saved)
 }
 
 func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, liveExec *executor.LiveExecutor, n *notify.Notifier, t db.OpenPaperTrade) {
@@ -462,7 +462,7 @@ func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB,
 		log.Printf("[stoploss/live] DB update failed %s: %v", t.ConditionID[:12], err)
 		return
 	}
-	n.StopLossTriggered(t.Market, t.Side, t.Sport, price, netPnl, saved)
+	n.StopLossTriggered(t.Market, t.Side, t.Sport, t.Slug, price, netPnl, saved)
 }
 
 // resolveLiveTrades checks all open real (non-paper) trades and resolves those
@@ -546,7 +546,7 @@ func resolveLiveTrades(ctx context.Context, database *db.DB, scanner *market.Sca
 
 		log.Printf("[resolve/live] %s | %-30s | %s | P&L: $%.2f (%.1f%%)",
 			outcome, t.Side, t.ConditionID[:12], netPnl, netPnlPct*100)
-		n.TradeResolved(m.Question, t.Side, outcome, netPnl)
+		n.TradeResolved(m.Question, t.Side, outcome, m.MarketSlug, netPnl)
 		resolved++
 	}
 
@@ -644,7 +644,7 @@ func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Sca
 
 		log.Printf("[resolve] %s | %-30s | %s | P&L: $%.2f (%.1f%%) [fee: $%.2f]",
 			outcome, t.Side, t.ConditionID[:12], netPnl, netPnlPct*100, t.BuyFee)
-		n.TradeResolved(m.Question, t.Side, outcome, netPnl)
+		n.TradeResolved(m.Question, t.Side, outcome, m.MarketSlug, netPnl)
 		resolved++
 	}
 
