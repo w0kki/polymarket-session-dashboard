@@ -13,6 +13,7 @@ import (
 	"github.com/w0kki/polymarket-bot/internal/executor"
 	"github.com/w0kki/polymarket-bot/internal/kelly"
 	"github.com/w0kki/polymarket-bot/internal/market"
+	"github.com/w0kki/polymarket-bot/internal/notify"
 )
 
 func main() {
@@ -32,6 +33,14 @@ func main() {
 		cfg.EntryThreshold*100, cfg.MaxPositionSize, cfg.ScanIntervalSec)
 	log.Printf("  DB:        %s", cfg.DBPath)
 	log.Printf("══════════════════════════════════════════════")
+
+	// ── Notifier ─────────────────────────────────────────────────────────────
+	notifier := notify.New(cfg.DiscordWebhookURL)
+	if notifier.Enabled() {
+		log.Printf("  Notifications: Discord ✓")
+	} else {
+		log.Printf("  Notifications: disabled (set DISCORD_WEBHOOK_URL to enable)")
+	}
 
 	// ── Database ──────────────────────────────────────────────────────────────
 	database, err := db.Open(cfg.DBPath)
@@ -84,12 +93,12 @@ func main() {
 	tick := time.NewTicker(time.Duration(cfg.ScanIntervalSec) * time.Second)
 	defer tick.Stop()
 
-	runScan(ctx, cfg, database, scanner, exec)
+	runScan(ctx, cfg, database, scanner, exec, notifier)
 
 	for {
 		select {
 		case <-tick.C:
-			runScan(ctx, cfg, database, scanner, exec)
+			runScan(ctx, cfg, database, scanner, exec, notifier)
 		case <-ctx.Done():
 			log.Println("shutting down")
 			return
@@ -103,9 +112,10 @@ func main() {
 //  1. Bankroll floor   — shuts the process down entirely (log.Fatalf).
 //  2. Circuit breaker  — 24-hour pause after N consecutive losses.
 //  3. Daily loss limit — halts for the rest of the calendar day.
-func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64) bool {
+func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64, n *notify.Notifier) bool {
 	// 1. Bankroll floor — hard stop, requires manual restart
 	if bankroll > 0 && bankroll < cfg.BankrollFloor {
+		n.BankrollFloor(bankroll, cfg.BankrollFloor)
 		log.Fatalf(
 			"[safety] 🚨 BANKROLL FLOOR BREACHED — balance $%.2f < floor $%.2f — SHUTTING DOWN. Investigate before restarting.",
 			bankroll, cfg.BankrollFloor,
@@ -127,6 +137,7 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64) bool
 		if err == nil && time.Now().UTC().After(t) {
 			_ = database.SetSetting("circuit_breaker_until", "")
 			log.Printf("[safety] circuit breaker expired — trading resumed")
+			n.CircuitBreakerCleared()
 		}
 	}
 
@@ -141,6 +152,7 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64) bool
 		} else {
 			log.Printf("[safety] 🚨 CIRCUIT BREAKER TRIPPED — %d consecutive losses — trading paused until %s UTC",
 				consec, until.Format("2006-01-02 15:04"))
+			n.CircuitBreaker(consec, until)
 		}
 		return true
 	}
@@ -152,6 +164,7 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64) bool
 	} else if dailyPnL < -cfg.MaxDailyLoss {
 		log.Printf("[safety] 🚨 DAILY LOSS LIMIT HIT — today P&L: $%.2f (limit: -$%.2f) — no more trades today",
 			dailyPnL, cfg.MaxDailyLoss)
+		n.DailyLossLimit(dailyPnL, cfg.MaxDailyLoss)
 		return true
 	}
 
@@ -160,7 +173,7 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64) bool
 
 // resolveOpenTrades checks every open paper trade against the CLOB API and
 // writes WIN/LOSS + P&L to the DB when the market has settled.
-func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Scanner) {
+func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Scanner, n *notify.Notifier) {
 	trades, err := database.GetOpenPaperTrades()
 	if err != nil {
 		log.Printf("[resolve] error fetching open trades: %v", err)
@@ -227,6 +240,7 @@ func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Sca
 
 		log.Printf("[resolve] %s | %-30s | %s | P&L: $%.2f (%.1f%%)",
 			outcome, t.Side, t.ConditionID[:12], pnl, pnlPct*100)
+		n.TradeResolved(m.Question, t.Side, outcome, pnl)
 		resolved++
 	}
 
@@ -242,11 +256,12 @@ func runScan(
 	database *db.DB,
 	scanner *market.Scanner,
 	exec executor.Executor,
+	n *notify.Notifier,
 ) {
 	log.Println("── scan start ──")
 
 	// 0. Resolve any open paper trades first
-	resolveOpenTrades(ctx, database, scanner)
+	resolveOpenTrades(ctx, database, scanner, n)
 
 	// 1. Load current bankroll from settings
 	bankroll, err := database.GetBankroll()
@@ -282,7 +297,7 @@ func runScan(
 
 	// Safety nets — halt trading if any circuit breaker is active.
 	// Open trade resolution above always runs; only new entries are blocked.
-	if checkSafetyNets(cfg, database, bankroll) {
+	if checkSafetyNets(cfg, database, bankroll, n) {
 		log.Println("── scan end (halted by safety net) ──")
 		return
 	}
@@ -330,7 +345,9 @@ func runScan(
 
 		if err := exec.PlaceOrder(ctx, opp); err != nil {
 			log.Printf("[scan] order failed for %s: %v", opp.ConditionID[:12], err)
+			continue
 		}
+		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Price, opp.SizeUSDC)
 	}
 
 	log.Println("── scan end ──")

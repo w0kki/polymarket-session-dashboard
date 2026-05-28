@@ -56,6 +56,10 @@ type Config struct {
 	// Path to the shared SQLite database.
 	DBPath string
 
+	// Discord webhook URL for trade/safety-net alerts.
+	// Leave empty to disable notifications.
+	DiscordWebhookURL string
+
 	// Fallback position size when Kelly can't be computed (not enough
 	// loss data yet). Kelly requires at least one loss to calculate b.
 	FallbackSize float64
@@ -89,7 +93,8 @@ func Load() *Config {
 		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
 		MinHoursToClose: envFloat("MIN_HOURS_TO_CLOSE", 0.0),
 		MaxHoursToClose: envFloat("MAX_HOURS_TO_CLOSE", 0.0),
-		DBPath:          envString("DB_PATH", "../trades.db"),
+		DBPath:              envString("DB_PATH", "../trades.db"),
+		DiscordWebhookURL:   envString("DISCORD_WEBHOOK_URL", ""),
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
 		ConsecLossLimit: envInt("CONSEC_LOSS_LIMIT", 3),
