@@ -35,9 +35,15 @@ import (
 )
 
 const (
-	clobBaseURL        = "https://clob.polymarket.com"
-	ctfExchangeAddr    = "4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // no 0x prefix for abi encoding
-	polygonChainID     = int64(137)
+	clobBaseURL    = "https://clob.polymarket.com"
+	ctfExchangeAddr = "4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // no 0x prefix for abi encoding
+	polygonChainID  = int64(137)
+
+	// feeRateBps is required by the CLOB and must match the market's tick size.
+	// All sports markets use minimum_tick_size=0.01, which maps to feeRateBps=1000
+	// (formula: 10 / tick_size = 10 / 0.01 = 1000).
+	// This value is part of the EIP-712 hash — it must match the JSON field exactly.
+	defaultFeeRateBps = int64(1000)
 
 	// EIP-712 type strings — must match exactly what the contract expects.
 	domainTypeSig = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -139,22 +145,28 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: invalid token_id %q for %s", opp.TokenID, opp.ConditionID[:12])
 	}
 
-	// Random 8-byte salt prevents replay attacks.
-	saltBytes := make([]byte, 8)
+	// Random 4-byte salt (fits safely in int64, matches py-clob-client's range).
+	saltBytes := make([]byte, 4)
 	if _, err := rand.Read(saltBytes); err != nil {
 		return fmt.Errorf("live: generate salt: %w", err)
 	}
 	salt := new(big.Int).SetBytes(saltBytes)
 
 	// ── Sign (side=0 for BUY) ─────────────────────────────────────────────────
-	sig, err := l.signOrder(salt, tokenID, makerAmt, takerAmt, 0)
+	sig, err := l.signOrder(salt, tokenID, makerAmt, takerAmt, 0, defaultFeeRateBps)
 	if err != nil {
 		return fmt.Errorf("live: sign order: %w", err)
 	}
 
 	// ── Build request body ────────────────────────────────────────────────────
+	// Field types must match what py-clob-client sends:
+	//   salt          → JSON integer (not string)
+	//   feeRateBps    → JSON string "1000" (required for 0.01-tick markets)
+	//   signatureType → JSON integer
+	//   side          → JSON string "BUY"/"SELL"
+	// Everything else (amounts, tokenId, expiration, nonce) → JSON strings.
 	type orderJSON struct {
-		Salt          string `json:"salt"`
+		Salt          int64  `json:"salt"`
 		Maker         string `json:"maker"`
 		Signer        string `json:"signer"`
 		Taker         string `json:"taker"`
@@ -176,7 +188,7 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 
 	body := reqBody{
 		Order: orderJSON{
-			Salt:          salt.String(),
+			Salt:          salt.Int64(),
 			Maker:         l.proxyWallet, // proxy wallet holds USDC (maker of funds)
 			Signer:        l.address,     // EOA signs the order
 			Taker:         "0x0000000000000000000000000000000000000000",
@@ -185,7 +197,7 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 			TakerAmount:   fmt.Sprintf("%d", takerAmt),
 			Expiration:    "0",
 			Nonce:         "0",
-			FeeRateBps:    "0",
+			FeeRateBps:    fmt.Sprintf("%d", defaultFeeRateBps),
 			Side:          "BUY",
 			SignatureType: 1, // Poly Proxy — signer is EOA, maker is proxy wallet
 			Signature:     sig,
@@ -284,19 +296,19 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 		return fmt.Errorf("live sell: invalid token_id %q", tokenID)
 	}
 
-	saltBytes := make([]byte, 8)
+	saltBytes := make([]byte, 4)
 	if _, err := rand.Read(saltBytes); err != nil {
 		return fmt.Errorf("live sell: generate salt: %w", err)
 	}
 	salt := new(big.Int).SetBytes(saltBytes)
 
-	sig, err := l.signOrder(salt, tokenIDBig, makerAmt, takerAmt, 1) // side=1 for SELL
+	sig, err := l.signOrder(salt, tokenIDBig, makerAmt, takerAmt, 1, defaultFeeRateBps) // side=1 for SELL
 	if err != nil {
 		return fmt.Errorf("live sell: sign order: %w", err)
 	}
 
 	type orderJSON struct {
-		Salt          string `json:"salt"`
+		Salt          int64  `json:"salt"`
 		Maker         string `json:"maker"`
 		Signer        string `json:"signer"`
 		Taker         string `json:"taker"`
@@ -318,7 +330,7 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 
 	body := reqBody{
 		Order: orderJSON{
-			Salt:          salt.String(),
+			Salt:          salt.Int64(),
 			Maker:         l.proxyWallet, // proxy wallet holds the tokens being sold
 			Signer:        l.address,     // EOA signs the order
 			Taker:         "0x0000000000000000000000000000000000000000",
@@ -327,7 +339,7 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 			TakerAmount:   fmt.Sprintf("%d", takerAmt),
 			Expiration:    "0",
 			Nonce:         "0",
-			FeeRateBps:    "0",
+			FeeRateBps:    fmt.Sprintf("%d", defaultFeeRateBps),
 			Side:          "SELL",
 			SignatureType: 1, // Poly Proxy
 			Signature:     sig,
@@ -370,8 +382,9 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 
 // signOrder builds the EIP-712 digest and returns a 0x-prefixed hex signature.
 // side: 0 = BUY, 1 = SELL (matches the CLOB's uint8 side field in the order struct).
-func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt int64, side int64) (string, error) {
-	orderHash := l.computeOrderHash(salt, tokenID, makerAmt, takerAmt, side)
+// feeRateBps must match the value sent in the JSON body (1000 for 0.01-tick markets).
+func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt, side, feeRateBps int64) (string, error) {
+	orderHash := l.computeOrderHash(salt, tokenID, makerAmt, takerAmt, side, feeRateBps)
 
 	// "\x19\x01" ‖ domainSeparator ‖ orderHash
 	digest := keccak256(append(append([]byte{0x19, 0x01}, l.domainSep...), orderHash...))
@@ -415,8 +428,9 @@ func (l *LiveExecutor) computeDomainSeparator() []byte {
 
 // computeOrderHash returns the EIP-712 struct hash for an Order.
 // side: 0 = BUY, 1 = SELL.
+// feeRateBps must match the value sent in the JSON (1000 for 0.01-tick markets).
 // maker = proxyWallet (funds holder); signer = EOA; signatureType = 1 (Poly Proxy).
-func (l *LiveExecutor) computeOrderHash(salt, tokenID *big.Int, makerAmt, takerAmt, side int64) []byte {
+func (l *LiveExecutor) computeOrderHash(salt, tokenID *big.Int, makerAmt, takerAmt, side, feeRateBps int64) []byte {
 	typeHash := keccak256([]byte(orderTypeSig))
 	zero32   := make([]byte, 32)
 
@@ -434,7 +448,7 @@ func (l *LiveExecutor) computeOrderHash(salt, tokenID *big.Int, makerAmt, takerA
 		padBigInt(big.NewInt(takerAmt)),                                  // takerAmount
 		zero32,                                                           // expiration = 0
 		zero32,                                                           // nonce = 0
-		zero32,                                                           // feeRateBps = 0
+		padBigInt(big.NewInt(feeRateBps)),                                // feeRateBps (1000 for 0.01-tick)
 		padBigInt(big.NewInt(side)),                                      // side: 0=BUY, 1=SELL
 		sigType1,                                                         // signatureType = 1 (Poly Proxy)
 	))
