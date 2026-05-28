@@ -682,11 +682,30 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			selfSignal()
 
 		case "live":
+			// Sanity-check credentials before committing to live mode so the
+			// bot doesn't enter a crash loop if the keys are invalid.
+			if cfg.PolyPrivateKey == "" || cfg.PolyAPIKey == "" {
+				n.Broadcast("❌ Cannot switch to LIVE — POLY_PRIVATE_KEY / POLY_API_KEY not set in config.")
+				return
+			}
+			liveExec, err := executor.NewLive(
+				cfg.PolyPrivateKey, cfg.PolyAPIKey,
+				cfg.PolyAPISecret, cfg.PolyAPIPassphrase,
+				database,
+			)
+			if err != nil {
+				n.Broadcast("❌ Live executor init failed: " + err.Error())
+				return
+			}
+			if err := liveExec.VerifyCredentials(context.Background()); err != nil {
+				n.Broadcast("❌ CLOB credential check failed — keys may be expired.\nError: " + err.Error() + "\n\nRegenerate keys at polymarket.com and update ecosystem.config.cjs.")
+				return
+			}
 			if err := database.SetSetting("mode_override", "live"); err != nil {
 				n.Broadcast("❌ Failed to set live mode: " + err.Error())
 				return
 			}
-			n.Broadcast("🟢 Switching to LIVE mode — restarting now...")
+			n.Broadcast("🟢 Credentials verified — switching to LIVE mode, restarting now...")
 			log.Println("[cmd] switching to LIVE mode via Telegram")
 			selfSignal()
 
