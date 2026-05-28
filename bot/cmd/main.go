@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -315,6 +316,18 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 
 		if err := exec.PlaceOrder(ctx, *opp); err != nil {
 			log.Printf("[poll] order failed for %s: %v", opp.ConditionID[:12], err)
+			errStr := err.Error()
+			if strings.Contains(errStr, "insufficient") || strings.Contains(errStr, "balance") || strings.Contains(errStr, "funds") {
+				n.Broadcast(fmt.Sprintf(
+					"⚠️ ORDER SKIPPED — insufficient USDC\n%s · %s @ %.1f¢ · $%.2f\nDeposit more USDC or reduce position size.",
+					opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC,
+				))
+			} else {
+				n.Broadcast(fmt.Sprintf(
+					"⚠️ ORDER FAILED — %s · %s @ %.1f¢\nError: %s",
+					opp.Sport, opp.Side, opp.Price*100, errStr,
+				))
+			}
 			continue
 		}
 		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Slug, opp.Price, opp.SizeUSDC)
