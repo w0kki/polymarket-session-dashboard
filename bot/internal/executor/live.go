@@ -35,9 +35,10 @@ import (
 )
 
 const (
-	clobBaseURL    = "https://clob.polymarket.com"
-	ctfExchangeAddr = "4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // no 0x prefix for abi encoding
-	polygonChainID  = int64(137)
+	clobBaseURL           = "https://clob.polymarket.com"
+	ctfExchangeAddr       = "4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" // regular CTF Exchange (neg_risk=false), no 0x prefix
+	ctfNegRiskExchangeAddr = "C5d563A36AE78145C45a50134d48A1215220f80a" // Neg Risk CTF Exchange (neg_risk=true), no 0x prefix
+	polygonChainID        = int64(137)
 
 	// feeRateBps is required by the CLOB and must match the market's tick size.
 	// All sports markets use minimum_tick_size=0.01, which maps to feeRateBps=1000
@@ -60,15 +61,16 @@ const (
 //   - signatureType 1 (Poly Proxy) tells the CTF Exchange contract to verify
 //     the EOA signature against the proxy wallet's authorisation record.
 type LiveExecutor struct {
-	privateKey    []byte // 32-byte secp256k1 private key
-	address       string // checksummed EOA address derived from private key (signer)
-	proxyWallet   string // Polymarket proxy wallet address (maker / fund holder)
-	apiKey        string
-	apiSecret     []byte // base64-decoded HMAC signing key
-	apiPassphrase string
-	client        *http.Client
-	domainSep     []byte // pre-computed EIP-712 domain separator
-	db            *db.DB // shared SQLite DB — write trade record immediately after fill
+	privateKey      []byte // 32-byte secp256k1 private key
+	address         string // checksummed EOA address derived from private key (signer)
+	proxyWallet     string // Polymarket proxy wallet address (maker / fund holder)
+	apiKey          string
+	apiSecret       []byte // base64-decoded HMAC signing key
+	apiPassphrase   string
+	client          *http.Client
+	domainSep       []byte // pre-computed EIP-712 domain separator — regular CTF Exchange
+	domainSepNegRisk []byte // pre-computed EIP-712 domain separator — Neg Risk CTF Exchange
+	db              *db.DB // shared SQLite DB — write trade record immediately after fill
 }
 
 // NewLive constructs a LiveExecutor from credentials and the shared database.
@@ -120,7 +122,8 @@ func NewLive(privateKeyHex, apiKey, apiSecret, passphrase, proxyWallet string, d
 		client:        &http.Client{Timeout: 15 * time.Second},
 		db:            database,
 	}
-	exe.domainSep = exe.computeDomainSeparator()
+	exe.domainSep = exe.computeDomainSeparator(ctfExchangeAddr)
+	exe.domainSepNegRisk = exe.computeDomainSeparator(ctfNegRiskExchangeAddr)
 	return exe, nil
 }
 
@@ -153,7 +156,7 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 	salt := new(big.Int).SetBytes(saltBytes)
 
 	// ── Sign (side=0 for BUY) ─────────────────────────────────────────────────
-	sig, err := l.signOrder(salt, tokenID, makerAmt, takerAmt, 0, defaultFeeRateBps)
+	sig, err := l.signOrder(salt, tokenID, makerAmt, takerAmt, 0, defaultFeeRateBps, opp.NegRisk)
 	if err != nil {
 		return fmt.Errorf("live: sign order: %w", err)
 	}
@@ -286,7 +289,9 @@ func (l *LiveExecutor) VerifyCredentials(ctx context.Context) error {
 // at the stop-loss price. Used exclusively by the live stop-loss handler.
 // tokenID is the CLOB token_id for the outcome being sold (fetched dynamically).
 // stopPrice is the minimum acceptable USDC per share (worst price we'll accept).
-func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string, shares, stopPrice float64) error {
+// negRisk must match the value stored at entry time — it determines which
+// CTF Exchange contract the order is routed to.
+func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string, shares, stopPrice float64, negRisk bool) error {
 	// SELL: makerAmount = shares we're offering; takerAmount = USDC we want back.
 	makerAmt := int64(shares*1e6 + 0.5)
 	takerAmt := int64(shares*stopPrice*1e6 + 0.5)
@@ -302,7 +307,7 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 	}
 	salt := new(big.Int).SetBytes(saltBytes)
 
-	sig, err := l.signOrder(salt, tokenIDBig, makerAmt, takerAmt, 1, defaultFeeRateBps) // side=1 for SELL
+	sig, err := l.signOrder(salt, tokenIDBig, makerAmt, takerAmt, 1, defaultFeeRateBps, negRisk) // side=1 for SELL
 	if err != nil {
 		return fmt.Errorf("live sell: sign order: %w", err)
 	}
@@ -383,11 +388,18 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 // signOrder builds the EIP-712 digest and returns a 0x-prefixed hex signature.
 // side: 0 = BUY, 1 = SELL (matches the CLOB's uint8 side field in the order struct).
 // feeRateBps must match the value sent in the JSON body (1000 for 0.01-tick markets).
-func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt, side, feeRateBps int64) (string, error) {
+// negRisk selects the CTF Exchange contract whose domain separator is used.
+func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt, side, feeRateBps int64, negRisk bool) (string, error) {
 	orderHash := l.computeOrderHash(salt, tokenID, makerAmt, takerAmt, side, feeRateBps)
 
+	// Select the correct pre-computed domain separator.
+	domSep := l.domainSep
+	if negRisk {
+		domSep = l.domainSepNegRisk
+	}
+
 	// "\x19\x01" ‖ domainSeparator ‖ orderHash
-	digest := keccak256(append(append([]byte{0x19, 0x01}, l.domainSep...), orderHash...))
+	digest := keccak256(append(append([]byte{0x19, 0x01}, domSep...), orderHash...))
 
 	privKey, err := gethcrypto.ToECDSA(l.privateKey)
 	if err != nil {
@@ -407,21 +419,23 @@ func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt, sid
 	return "0x" + hex.EncodeToString(sig), nil
 }
 
-// computeDomainSeparator pre-computes the EIP-712 domain separator once at
-// startup.
+// computeDomainSeparator pre-computes the EIP-712 domain separator for the
+// given CTF Exchange contract address (no 0x prefix).
 //
-// "ClobAuthDomain" is the domain for L2 API-key authentication (the POLY_*
-// request headers). Order signing uses the CTF Exchange contract's own domain:
-// name="Polymarket CTF Exchange", version="1", chainId=137.
+// Polymarket uses two exchange contracts on Polygon:
+//   - Regular:  0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E  (neg_risk=false)
+//   - Neg Risk: 0xC5d563A36AE78145C45a50134d48A1215220f80a  (neg_risk=true)
 //
-// Using the wrong domain produces a valid-looking but unverifiable signature —
-// the CLOB rejects it with HTTP 400 "Invalid order payload".
-func (l *LiveExecutor) computeDomainSeparator() []byte {
+// Both use name="Polymarket CTF Exchange", version="1", chainId=137, but the
+// verifyingContract field differs. Signing with the wrong contract address
+// produces a valid-looking but unverifiable signature → CLOB returns
+// HTTP 400 "order_version_mismatch".
+func (l *LiveExecutor) computeDomainSeparator(exchangeAddr string) []byte {
 	typeHash    := keccak256([]byte(domainTypeSig))
 	nameHash    := keccak256([]byte("Polymarket CTF Exchange"))
 	versionHash := keccak256([]byte("1"))
 	chainID     := padBigInt(big.NewInt(polygonChainID))
-	contract    := padHexAddr(ctfExchangeAddr)
+	contract    := padHexAddr(exchangeAddr)
 
 	return keccak256(concatBytes(typeHash, nameHash, versionHash, chainID, contract))
 }

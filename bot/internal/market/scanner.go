@@ -55,6 +55,7 @@ type clobMarket struct {
 	EndDateISO      string      `json:"end_date_iso"`
 	Tokens          []clobToken `json:"tokens"`
 	Icon            string      `json:"icon"`
+	NegRisk         bool        `json:"neg_risk"`
 }
 
 type clobResponse struct {
@@ -76,6 +77,7 @@ type Opportunity struct {
 	Shares      float64 // position_size / price
 	SizeUSDC    float64 // final position size after Kelly + cap
 	Icon        string
+	NegRisk     bool    // true = Neg Risk CTF Exchange; false = regular CTF Exchange
 }
 
 // ── Scanner ───────────────────────────────────────────────────────────────────
@@ -127,6 +129,7 @@ type WatchlistEntry struct {
 	Slug        string
 	Sport       string
 	Icon        string
+	NegRisk     bool   // true = Neg Risk CTF Exchange; false = regular CTF Exchange
 }
 
 // BuildWatchlist does a full market scan and returns every market that passes
@@ -151,6 +154,7 @@ func (s *Scanner) BuildWatchlist(alreadyTraded, activePositions map[string]bool)
 			Slug:        m.MarketSlug,
 			Sport:       sport,
 			Icon:        m.Icon,
+			NegRisk:     m.NegRisk,
 		})
 	}
 	return entries, nil
@@ -245,7 +249,30 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		Shares:      shares,
 		SizeUSDC:    size,
 		Icon:        m.Icon,
+		NegRisk:     entry.NegRisk,
 	}, nil
+}
+
+// GetNegRisk queries the CLOB to determine which CTF Exchange contract a token
+// belongs to. Returns true for the Neg Risk exchange, false for the regular one.
+// Called at stop-loss time (rare) so the extra HTTP request is acceptable.
+func (s *Scanner) GetNegRisk(tokenID string) (bool, error) {
+	url := fmt.Sprintf("https://clob.polymarket.com/neg-risk?token_id=%s", tokenID)
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return false, fmt.Errorf("neg-risk API: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("neg-risk API returned %d", resp.StatusCode)
+	}
+	var result struct {
+		NegRisk bool `json:"neg_risk"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decode neg-risk response: %w", err)
+	}
+	return result.NegRisk, nil
 }
 
 // fetchVolume calls the Gamma API to get the total trading volume (USD) for a

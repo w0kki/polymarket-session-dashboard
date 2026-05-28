@@ -603,8 +603,15 @@ func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB,
 	log.Printf("[stoploss/live] ⛔ %s | %s | entry=%.1f¢ stop=%.1f¢ exit=%.1f¢ | P&L: $%.2f | saved: $%.2f",
 		t.Sport, t.Side[:min(30, len(t.Side))], t.EntryPrice*100, stopThreshold*100, price*100, netPnl, saved)
 
+	// Resolve which CTF Exchange this token belongs to before signing the sell.
+	negRisk, err := scanner.GetNegRisk(tokenID)
+	if err != nil {
+		log.Printf("[stoploss/live] neg_risk lookup failed %s: %v — defaulting to false", t.ConditionID[:12], err)
+		negRisk = false
+	}
+
 	// Place actual SELL on the CLOB before updating the DB.
-	if err := liveExec.PlaceSellOrder(ctx, tokenID, t.Side, t.Shares, price); err != nil {
+	if err := liveExec.PlaceSellOrder(ctx, tokenID, t.Side, t.Shares, price, negRisk); err != nil {
 		log.Printf("[stoploss/live] CLOB sell failed %s: %v", t.ConditionID[:12], err)
 		return // don't update DB if the sell didn't go through
 	}
