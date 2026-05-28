@@ -85,6 +85,17 @@ func main() {
 		log.Printf("  Effective mode: %s", mode)
 	}
 
+	// ── Startup notification ──────────────────────────────────────────────────
+	// Send a brief ping so the operator knows the bot came back up after a
+	// restart. Fires after mode_override is applied so the label is accurate.
+	if notifier.Enabled() {
+		modeLabel := "📋 PAPER"
+		if !cfg.DryRun {
+			modeLabel = "🟢 LIVE"
+		}
+		notifier.Broadcast(fmt.Sprintf("🚀 Bot started — %s mode", modeLabel))
+	}
+
 	// ── Executor ──────────────────────────────────────────────────────────────
 	var exec executor.Executor
 	if cfg.DryRun {
