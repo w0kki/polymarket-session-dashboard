@@ -89,10 +89,16 @@ type Config struct {
 
 	// Live trading credentials — only required when DRY_RUN=false.
 	// Generated once via py-clob-client; stored as env vars on the server.
-	PolyPrivateKey    string // POLY_PRIVATE_KEY   — EOA private key (hex, 0x-prefixed optional)
-	PolyAPIKey        string // POLY_API_KEY        — L2 API key (UUID)
-	PolyAPISecret     string // POLY_API_SECRET     — L2 API secret (base64url)
-	PolyAPIPassphrase string // POLY_API_PASSPHRASE — L2 passphrase (hex)
+	PolyPrivateKey    string // POLY_PRIVATE_KEY    — EOA private key (hex, 0x-prefixed optional)
+	PolyAPIKey        string // POLY_API_KEY         — L2 API key (UUID)
+	PolyAPISecret     string // POLY_API_SECRET      — L2 API secret (base64url)
+	PolyAPIPassphrase string // POLY_API_PASSPHRASE  — L2 passphrase (hex)
+	// PolyProxyWallet is the Polymarket proxy wallet address that holds USDC.
+	// Polymarket separates the signing key (EOA/MetaMask) from the funded wallet
+	// (proxy). Orders must set maker=ProxyWallet, signer=EOA, signatureType=1.
+	// Find it on polymarket.com → Profile — it differs from your MetaMask address.
+	// POLY_PROXY_WALLET (required for live trading)
+	PolyProxyWallet string
 
 	// Fallback position size when Kelly can't be computed (not enough
 	// loss data yet). Kelly requires at least one loss to calculate b.
@@ -154,6 +160,7 @@ func Load() *Config {
 		PolyAPIKey:        envString("POLY_API_KEY", ""),
 		PolyAPISecret:     envString("POLY_API_SECRET", ""),
 		PolyAPIPassphrase: envString("POLY_API_PASSPHRASE", ""),
+		PolyProxyWallet:   envString("POLY_PROXY_WALLET", ""),
 		StopLossDrop:    envFloat("STOP_LOSS_DROP", 0.50),
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),

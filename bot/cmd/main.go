@@ -27,6 +27,15 @@ var (
 	watchlist   []market.WatchlistEntry
 )
 
+// orderFailCooldown tracks the last time an order failed for a given
+// conditionID. If the same market fails again within orderFailCooldownDur,
+// the bot skips it silently to prevent alert spam every 10 seconds.
+var (
+	orderFailMu       sync.Mutex
+	orderFailAt       = map[string]time.Time{}
+	orderFailCooldown = 5 * time.Minute
+)
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("")
@@ -107,6 +116,7 @@ func main() {
 			cfg.PolyAPIKey,
 			cfg.PolyAPISecret,
 			cfg.PolyAPIPassphrase,
+			cfg.PolyProxyWallet,
 			database,
 		)
 		if err != nil {
@@ -316,20 +326,37 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 
 		if err := exec.PlaceOrder(ctx, *opp); err != nil {
 			log.Printf("[poll] order failed for %s: %v", opp.ConditionID[:12], err)
-			errStr := err.Error()
-			if strings.Contains(errStr, "insufficient") || strings.Contains(errStr, "balance") || strings.Contains(errStr, "funds") {
-				n.Broadcast(fmt.Sprintf(
-					"⚠️ ORDER SKIPPED — insufficient USDC\n%s · %s @ %.1f¢ · $%.2f\nDeposit more USDC or reduce position size.",
-					opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC,
-				))
+
+			// Cooldown: only alert once per market per 5 minutes to prevent
+			// notification spam on repeated poll cycles.
+			orderFailMu.Lock()
+			lastFail, seen := orderFailAt[opp.ConditionID]
+			if !seen || time.Since(lastFail) >= orderFailCooldown {
+				orderFailAt[opp.ConditionID] = time.Now()
+				orderFailMu.Unlock()
+
+				errStr := err.Error()
+				if strings.Contains(errStr, "insufficient") || strings.Contains(errStr, "balance") || strings.Contains(errStr, "funds") {
+					n.Broadcast(fmt.Sprintf(
+						"⚠️ ORDER SKIPPED — insufficient USDC\n%s · %s @ %.1f¢ · $%.2f\nDeposit more USDC or reduce position size.",
+						opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC,
+					))
+				} else {
+					n.Broadcast(fmt.Sprintf(
+						"⚠️ ORDER FAILED — %s · %s @ %.1f¢\nError: %s",
+						opp.Sport, opp.Side, opp.Price*100, errStr,
+					))
+				}
 			} else {
-				n.Broadcast(fmt.Sprintf(
-					"⚠️ ORDER FAILED — %s · %s @ %.1f¢\nError: %s",
-					opp.Sport, opp.Side, opp.Price*100, errStr,
-				))
+				orderFailMu.Unlock()
+				log.Printf("[poll] order failure suppressed (cooldown) for %s", opp.ConditionID[:12])
 			}
 			continue
 		}
+		// Clear any failure cooldown on success.
+		orderFailMu.Lock()
+		delete(orderFailAt, opp.ConditionID)
+		orderFailMu.Unlock()
 		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Slug, opp.Price, opp.SizeUSDC)
 	}
 }
@@ -721,6 +748,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			liveExec, err := executor.NewLive(
 				cfg.PolyPrivateKey, cfg.PolyAPIKey,
 				cfg.PolyAPISecret, cfg.PolyAPIPassphrase,
+				cfg.PolyProxyWallet,
 				database,
 			)
 			if err != nil {

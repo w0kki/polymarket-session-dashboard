@@ -47,9 +47,16 @@ const (
 // LiveExecutor places real orders on the Polymarket CLOB via EIP-712 signed
 // limit orders submitted as Fill-or-Kill (FOK) — they fill at the observed
 // price or are cancelled immediately, preventing partial fills.
+//
+// Polymarket uses a proxy-wallet architecture:
+//   - proxyWallet  — the Polymarket-managed account that holds USDC (maker)
+//   - address      — the MetaMask EOA that signs orders (signer)
+//   - signatureType 1 (Poly Proxy) tells the CTF Exchange contract to verify
+//     the EOA signature against the proxy wallet's authorisation record.
 type LiveExecutor struct {
 	privateKey    []byte // 32-byte secp256k1 private key
-	address       string // checksummed hex address derived from private key
+	address       string // checksummed EOA address derived from private key (signer)
+	proxyWallet   string // Polymarket proxy wallet address (maker / fund holder)
 	apiKey        string
 	apiSecret     []byte // base64-decoded HMAC signing key
 	apiPassphrase string
@@ -58,13 +65,16 @@ type LiveExecutor struct {
 	db            *db.DB // shared SQLite DB — write trade record immediately after fill
 }
 
-// NewLive constructs a LiveExecutor from the four POLY_* env-var credentials
-// and the shared database (used to record trades immediately after placement).
-// Returns an error if any credential is missing or malformed — call this before
-// setting DRY_RUN=false so misconfiguration is caught at startup.
-func NewLive(privateKeyHex, apiKey, apiSecret, passphrase string, database *db.DB) (*LiveExecutor, error) {
+// NewLive constructs a LiveExecutor from credentials and the shared database.
+// proxyWallet is the Polymarket proxy wallet address (maker); it differs from
+// the EOA address derived from privateKeyHex (signer). Both are required.
+// Returns an error if any credential is missing or malformed.
+func NewLive(privateKeyHex, apiKey, apiSecret, passphrase, proxyWallet string, database *db.DB) (*LiveExecutor, error) {
 	if privateKeyHex == "" || apiKey == "" || apiSecret == "" || passphrase == "" {
 		return nil, fmt.Errorf("live executor: POLY_PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET and POLY_API_PASSPHRASE must all be set")
+	}
+	if proxyWallet == "" {
+		return nil, fmt.Errorf("live executor: POLY_PROXY_WALLET must be set (your Polymarket proxy wallet address, not your MetaMask EOA)")
 	}
 
 	// Parse private key.
@@ -91,11 +101,13 @@ func NewLive(privateKeyHex, apiKey, apiSecret, passphrase string, database *db.D
 		}
 	}
 
-	log.Printf("[live] executor ready — address: %s", address)
+	log.Printf("[live] executor ready — signer (EOA): %s", address)
+	log.Printf("[live] executor ready — maker (proxy): %s", proxyWallet)
 
 	exe := &LiveExecutor{
 		privateKey:    keyBytes,
 		address:       address,
+		proxyWallet:   proxyWallet,
 		apiKey:        apiKey,
 		apiSecret:     secretBytes,
 		apiPassphrase: passphrase,
@@ -165,8 +177,8 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 	body := reqBody{
 		Order: orderJSON{
 			Salt:          salt.String(),
-			Maker:         l.address,
-			Signer:        l.address,
+			Maker:         l.proxyWallet, // proxy wallet holds USDC (maker of funds)
+			Signer:        l.address,     // EOA signs the order
 			Taker:         "0x0000000000000000000000000000000000000000",
 			TokenID:       opp.TokenID,
 			MakerAmount:   fmt.Sprintf("%d", makerAmt),
@@ -175,7 +187,7 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 			Nonce:         "0",
 			FeeRateBps:    "0",
 			Side:          "BUY",
-			SignatureType: 0, // EOA
+			SignatureType: 1, // Poly Proxy — signer is EOA, maker is proxy wallet
 			Signature:     sig,
 		},
 		Owner:     l.apiKey,
@@ -307,8 +319,8 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 	body := reqBody{
 		Order: orderJSON{
 			Salt:          salt.String(),
-			Maker:         l.address,
-			Signer:        l.address,
+			Maker:         l.proxyWallet, // proxy wallet holds the tokens being sold
+			Signer:        l.address,     // EOA signs the order
 			Taker:         "0x0000000000000000000000000000000000000000",
 			TokenID:       tokenID,
 			MakerAmount:   fmt.Sprintf("%d", makerAmt),
@@ -317,7 +329,7 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 			Nonce:         "0",
 			FeeRateBps:    "0",
 			Side:          "SELL",
-			SignatureType: 0,
+			SignatureType: 1, // Poly Proxy
 			Signature:     sig,
 		},
 		Owner:     l.apiKey,
@@ -397,24 +409,28 @@ func (l *LiveExecutor) computeDomainSeparator() []byte {
 
 // computeOrderHash returns the EIP-712 struct hash for an Order.
 // side: 0 = BUY, 1 = SELL.
+// maker = proxyWallet (funds holder); signer = EOA; signatureType = 1 (Poly Proxy).
 func (l *LiveExecutor) computeOrderHash(salt, tokenID *big.Int, makerAmt, takerAmt, side int64) []byte {
 	typeHash := keccak256([]byte(orderTypeSig))
 	zero32   := make([]byte, 32)
 
+	sigType1 := make([]byte, 32)
+	sigType1[31] = 1 // signatureType = 1 (Poly Proxy)
+
 	return keccak256(concatBytes(
 		typeHash,
-		padBigInt(salt),                                              // salt
-		padHexAddr(strings.TrimPrefix(l.address, "0x")),             // maker
-		padHexAddr(strings.TrimPrefix(l.address, "0x")),             // signer (same as maker, EOA)
-		zero32,                                                       // taker = address(0)
-		padBigInt(tokenID),                                           // tokenId
-		padBigInt(big.NewInt(makerAmt)),                              // makerAmount
-		padBigInt(big.NewInt(takerAmt)),                              // takerAmount
-		zero32,                                                       // expiration = 0
-		zero32,                                                       // nonce = 0
-		zero32,                                                       // feeRateBps = 0
-		padBigInt(big.NewInt(side)),                                  // side: 0=BUY, 1=SELL
-		zero32,                                                       // signatureType = 0 (EOA)
+		padBigInt(salt),                                                  // salt
+		padHexAddr(strings.TrimPrefix(l.proxyWallet, "0x")),             // maker = proxy wallet
+		padHexAddr(strings.TrimPrefix(l.address, "0x")),                  // signer = EOA
+		zero32,                                                           // taker = address(0)
+		padBigInt(tokenID),                                               // tokenId
+		padBigInt(big.NewInt(makerAmt)),                                  // makerAmount
+		padBigInt(big.NewInt(takerAmt)),                                  // takerAmount
+		zero32,                                                           // expiration = 0
+		zero32,                                                           // nonce = 0
+		zero32,                                                           // feeRateBps = 0
+		padBigInt(big.NewInt(side)),                                      // side: 0=BUY, 1=SELL
+		sigType1,                                                         // signatureType = 1 (Poly Proxy)
 	))
 }
 
