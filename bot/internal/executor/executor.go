@@ -55,17 +55,8 @@ func (p *PaperExecutor) PlaceOrder(_ context.Context, opp market.Opportunity) er
 	return nil
 }
 
-// ── Live executor stub ────────────────────────────────────────────────────────
-
-// LiveExecutor will be implemented in Phase 8 (EIP-712 signing + CLOB API).
-// It panics now so it cannot be accidentally activated during paper testing.
-type LiveExecutor struct{}
-
-func NewLive() *LiveExecutor { return &LiveExecutor{} }
-
-func (l *LiveExecutor) PlaceOrder(_ context.Context, opp market.Opportunity) error {
-	panic("LiveExecutor not implemented — set DRY_RUN=true for paper trading")
-}
+// LiveExecutor is implemented in live.go.
+// Construct via NewLive(privateKey, apiKey, apiSecret, passphrase).
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
