@@ -31,18 +31,20 @@ func (d *DB) Close() error { return d.conn.Close() }
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 // GetBankroll reads the bankroll from the settings table (set via KCC panel).
-func (d *DB) GetBankroll() (float64, error) {
-	var raw string
-	err := d.conn.QueryRow(`SELECT value FROM settings WHERE key = 'bankroll'`).Scan(&raw)
-	if err == sql.ErrNoRows {
-		return 0, nil
+// Also returns the UTC timestamp when the bankroll was last set, used to
+// compute balance = bankroll + live P&L since that date.
+// timestamp is empty string when the row has never been written with a timestamp.
+func (d *DB) GetBankroll() (amount float64, since string, err error) {
+	var raw, ts string
+	e := d.conn.QueryRow(`SELECT value, updated_at FROM settings WHERE key = 'bankroll'`).Scan(&raw, &ts)
+	if e == sql.ErrNoRows {
+		return 0, "", nil
 	}
-	if err != nil {
-		return 0, fmt.Errorf("get bankroll: %w", err)
+	if e != nil {
+		return 0, "", fmt.Errorf("get bankroll: %w", e)
 	}
-	var v float64
-	fmt.Sscanf(raw, "%f", &v)
-	return v, nil
+	fmt.Sscanf(raw, "%f", &amount)
+	return amount, ts, nil
 }
 
 // ── Trade stats (for Kelly) ──────────────────────────────────────────────────
@@ -126,10 +128,26 @@ func (d *DB) GetAllTimePnL() (float64, error) {
 	return pnl, err
 }
 
+// GetLivePnLSince returns net P&L from real (non-paper) trades resolved
+// after the given UTC timestamp string (SQLite datetime format).
+// Used to compute the current effective balance: bankroll + GetLivePnLSince(since).
+// Only counting trades after the bankroll was last set prevents double-counting
+// losses that already occurred before the bankroll figure was updated.
+func (d *DB) GetLivePnLSince(since string) (float64, error) {
+	var pnl float64
+	err := d.conn.QueryRow(`
+		SELECT COALESCE(SUM(net_pnl), 0)
+		FROM trades
+		WHERE outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
+		  AND net_pnl IS NOT NULL
+		  AND trade_type IN ('Risk Premia', 'Latency Arb')
+		  AND updated_at >= ?
+	`, since).Scan(&pnl)
+	return pnl, err
+}
+
 // GetLiveAllTimePnL returns total net P&L from real (non-paper) trades only.
-// Used to compute the current effective balance: bankroll + GetLiveAllTimePnL().
-// Paper P&L is excluded because the bankroll is set to the current wallet
-// balance — adding backtested paper profits would double-count them.
+// Used for display in /status (all-time figure, not balance-adjusted).
 func (d *DB) GetLiveAllTimePnL() (float64, error) {
 	var pnl float64
 	err := d.conn.QueryRow(`

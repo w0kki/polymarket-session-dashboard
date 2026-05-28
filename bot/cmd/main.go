@@ -253,16 +253,17 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 	// Check stop loss on all open positions before looking for new entries.
 	runStopLoss(ctx, cfg, database, scanner, exec, n)
 
-	// Load bankroll (configured starting budget) and compute current balance.
-	// currentBalance = bankroll + live-trade P&L only.
-	// Paper P&L is excluded: the bankroll is set to the current wallet balance
-	// so adding backtested paper profits would inflate the number falsely.
-	bankroll, err := database.GetBankroll()
+	// Load bankroll and compute current balance.
+	// balance = bankroll + live P&L earned AFTER the bankroll was last set.
+	// Trades resolved before the bankroll was updated are already reflected in
+	// the bankroll figure itself, so we exclude them to avoid double-counting.
+	bankroll, bankrollSince, err := database.GetBankroll()
 	if err != nil || bankroll <= 0 {
 		bankroll = cfg.FallbackSize * 3
+		bankrollSince = ""
 	}
-	liveAllTimePnL, _ := database.GetLiveAllTimePnL()
-	currentBalance := bankroll + liveAllTimePnL
+	livePnLSince, _ := database.GetLivePnLSince(bankrollSince)
+	currentBalance := bankroll + livePnLSince
 
 	stats, err := database.GetTradeStats()
 	if err != nil {
@@ -645,9 +646,9 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			liveTrades, _ := database.GetOpenLiveTrades()
 			todayPnL, _ := database.GetTodayPnL()
 			allPnL, _ := database.GetAllTimePnL()
-			livePnL, _ := database.GetLiveAllTimePnL()
-			bankroll, _ := database.GetBankroll()
-			balance := bankroll + livePnL // live P&L only — paper profits excluded
+			bankroll, since, _ := database.GetBankroll()
+			livePnLSince, _ := database.GetLivePnLSince(since)
+			balance := bankroll + livePnLSince
 			n.Broadcast(fmt.Sprintf(
 				"📊 BOT STATUS\n"+
 					"Mode: %s (override: %s)\n"+
@@ -680,7 +681,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 				n.Broadcast("❌ Usage: /bankroll <amount>  e.g. /bankroll 1500")
 				return
 			}
-			old, _ := database.GetBankroll()
+			old, _, _ := database.GetBankroll()
 			if err := database.SetSetting("bankroll", fmt.Sprintf("%.2f", amount)); err != nil {
 				n.Broadcast("❌ Failed to update bankroll: " + err.Error())
 				return
@@ -688,8 +689,8 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			floor := amount * cfg.BankrollFloorPct
 			log.Printf("[cmd] bankroll updated $%.2f → $%.2f via Telegram", old, amount)
 			n.Broadcast(fmt.Sprintf(
-				"💰 Bankroll updated: $%.2f → $%.2f\nFloor (%.0f%%): $%.2f",
-				old, amount, cfg.BankrollFloorPct*100, floor,
+				"💰 Bankroll updated: $%.2f → $%.2f\nFloor (%.0f%%): $%.2f\nBalance resets to $%.2f — only new live trades will adjust it.",
+				old, amount, cfg.BankrollFloorPct*100, floor, amount,
 			))
 
 		case "stop":
