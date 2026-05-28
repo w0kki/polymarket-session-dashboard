@@ -49,6 +49,23 @@ func main() {
 	}
 
 	// ── Scanner ───────────────────────────────────────────────────────────────
+	// Build per-sport price bounds from config.
+	// Sports not listed here fall back to the global EntryThreshold/MaxEntryPrice.
+	sportBounds := map[string]market.SportBounds{
+		"Tennis": {
+			MinPrice: cfg.TennisMinPrice,
+			MaxPrice: cfg.TennisMaxPrice,
+		},
+		"Baseball": {
+			MinPrice: cfg.BaseballMinPrice,
+			MaxPrice: cfg.BaseballMaxPrice,
+		},
+	}
+	log.Printf("  Tennis:    %.0f¢–%.0f¢  Baseball: %.0f¢–%.0f¢",
+		cfg.TennisMinPrice*100, cfg.TennisMaxPrice*100,
+		cfg.BaseballMinPrice*100, cfg.BaseballMaxPrice*100,
+	)
+
 	scanner := market.NewScanner(
 		cfg.EntryThreshold,
 		cfg.MaxEntryPrice,
@@ -56,6 +73,7 @@ func main() {
 		cfg.MaxPositionSize,
 		cfg.MinHoursToClose,
 		cfg.MaxHoursToClose,
+		sportBounds,
 	)
 
 	// ── Run loop ──────────────────────────────────────────────────────────────

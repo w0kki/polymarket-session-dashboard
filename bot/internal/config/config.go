@@ -16,12 +16,28 @@ type Config struct {
 	// How often the bot scans for new opportunities (seconds).
 	ScanIntervalSec int
 
-	// Minimum token price to enter a trade (0.93 = 93¢ favourite).
+	// Minimum token price to enter a trade (global default across all sports).
 	EntryThreshold float64
 
-	// Maximum token price — avoids near-resolved markets where fees exceed upside.
-	// At 0.97 the max gain is 3¢/$ risked; above that fees dominate.
+	// Maximum token price (global default) — avoids near-resolved markets where
+	// fees exceed upside. At 0.97 the max gain is 3¢/$ risked; above that fees
+	// dominate. Set 0 to disable.
 	MaxEntryPrice float64
+
+	// Per-sport price overrides. When set, these take precedence over the global
+	// EntryThreshold / MaxEntryPrice for that specific sport.
+	//
+	// Tennis: edge only exists at 96¢+; at 94–95¢ the historical win rate (91%)
+	// is below the market-implied probability.
+	// TENNIS_MIN_PRICE (default 0.96), TENNIS_MAX_PRICE (default 0.97)
+	TennisMinPrice float64
+	TennisMaxPrice float64
+
+	// Baseball: edge exists at 94–95.5¢; at 96¢+ favourites lose more often
+	// than the market implies (MLB variance is higher than tennis).
+	// BASEBALL_MIN_PRICE (default 0.94), BASEBALL_MAX_PRICE (default 0.955)
+	BaseballMinPrice float64
+	BaseballMaxPrice float64
 
 	// Hard cap on position size regardless of Kelly output ($30).
 	MaxPositionSize float64
@@ -65,6 +81,10 @@ func Load() *Config {
 		ScanIntervalSec: envInt("SCAN_INTERVAL_SEC", 30),
 		EntryThreshold:  envFloat("ENTRY_THRESHOLD", 0.94),
 		MaxEntryPrice:   envFloat("MAX_ENTRY_PRICE", 0.97),
+		TennisMinPrice:  envFloat("TENNIS_MIN_PRICE", 0.96),
+		TennisMaxPrice:  envFloat("TENNIS_MAX_PRICE", 0.97),
+		BaseballMinPrice: envFloat("BASEBALL_MIN_PRICE", 0.94),
+		BaseballMaxPrice: envFloat("BASEBALL_MAX_PRICE", 0.955),
 		MaxPositionSize: envFloat("MAX_POSITION_SIZE", 30.0),
 		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
 		MinHoursToClose: envFloat("MIN_HOURS_TO_CLOSE", 0.0),

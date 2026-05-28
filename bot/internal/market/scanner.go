@@ -79,6 +79,13 @@ type Opportunity struct {
 
 // ── Scanner ───────────────────────────────────────────────────────────────────
 
+// SportBounds overrides the global entry threshold and max price for a specific
+// sport. Both fields are optional: a zero value means "use the global default".
+type SportBounds struct {
+	MinPrice float64 // 0 = use global EntryThreshold
+	MaxPrice float64 // 0 = use global MaxEntryPrice
+}
+
 type Scanner struct {
 	threshold       float64
 	maxPrice        float64
@@ -86,10 +93,14 @@ type Scanner struct {
 	maxSize         float64
 	minHoursToClose float64
 	maxHoursToClose float64
+	sportBounds     map[string]SportBounds
 	client          *http.Client
 }
 
-func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose float64) *Scanner {
+func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose float64, sportBounds map[string]SportBounds) *Scanner {
+	if sportBounds == nil {
+		sportBounds = map[string]SportBounds{}
+	}
 	return &Scanner{
 		threshold:       threshold,
 		maxPrice:        maxPrice,
@@ -97,6 +108,7 @@ func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursT
 		maxSize:         maxSize,
 		minHoursToClose: minHoursToClose,
 		maxHoursToClose: maxHoursToClose,
+		sportBounds:     sportBounds,
 		client:          &http.Client{Timeout: 20 * time.Second},
 	}
 }
@@ -127,10 +139,23 @@ func (s *Scanner) Scan(
 		if side == "" {
 			continue
 		}
-		if price < s.threshold {
+
+		// Apply per-sport price bounds if set; otherwise use global thresholds.
+		minPrice := s.threshold
+		maxPrice := s.maxPrice
+		if bounds, ok := s.sportBounds[sport]; ok {
+			if bounds.MinPrice > 0 {
+				minPrice = bounds.MinPrice
+			}
+			if bounds.MaxPrice > 0 {
+				maxPrice = bounds.MaxPrice
+			}
+		}
+
+		if price < minPrice {
 			continue
 		}
-		if s.maxPrice > 0 && price > s.maxPrice {
+		if maxPrice > 0 && price > maxPrice {
 			continue
 		}
 
