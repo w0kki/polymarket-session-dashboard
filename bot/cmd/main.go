@@ -218,11 +218,13 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 	// Check stop loss on all open positions before looking for new entries.
 	runStopLoss(ctx, cfg, database, scanner, exec, n)
 
-	// Load bankroll and compute Kelly sizing.
+	// Load bankroll (configured starting budget) and compute current balance.
 	bankroll, err := database.GetBankroll()
 	if err != nil || bankroll <= 0 {
 		bankroll = cfg.FallbackSize * 3
 	}
+	allTimePnL, _ := database.GetAllTimePnL()
+	currentBalance := bankroll + allTimePnL
 
 	stats, err := database.GetTradeStats()
 	if err != nil {
@@ -236,7 +238,7 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 	sizer := func(_ float64) float64 { return kellyResult.PositionSize }
 
 	// Check safety nets before entering any new positions.
-	if checkSafetyNets(cfg, database, bankroll, n) {
+	if checkSafetyNets(cfg, database, bankroll, currentBalance, n) {
 		return
 	}
 
@@ -282,13 +284,17 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 
 // ── Safety nets ───────────────────────────────────────────────────────────────
 
-func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64, n *notify.Notifier) bool {
+func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalance float64, n *notify.Notifier) bool {
 	// 1. Bankroll floor — hard stop, requires manual restart.
-	if bankroll > 0 && bankroll < cfg.BankrollFloor {
-		n.BankrollFloor(bankroll, cfg.BankrollFloor)
+	// Floor = configured bankroll × BankrollFloorPct (default 30%).
+	// currentBalance = bankroll + all-time resolved P&L, so it reflects
+	// actual gains/losses rather than the static configured figure.
+	floor := bankroll * cfg.BankrollFloorPct
+	if bankroll > 0 && currentBalance < floor {
+		n.BankrollFloor(currentBalance, floor)
 		log.Fatalf(
-			"[safety] 🚨 BANKROLL FLOOR BREACHED — balance $%.2f < floor $%.2f — SHUTTING DOWN.",
-			bankroll, cfg.BankrollFloor,
+			"[safety] 🚨 BANKROLL FLOOR BREACHED — balance $%.2f < floor $%.2f (%.0f%% of $%.2f) — SHUTTING DOWN.",
+			currentBalance, floor, cfg.BankrollFloorPct*100, bankroll,
 		)
 	}
 

@@ -117,9 +117,12 @@ type Config struct {
 	// Number of consecutive losses that triggers a 24-hour trading pause.
 	ConsecLossLimit int
 
-	// Minimum bankroll. Bot shuts down entirely if balance falls below this.
+	// Bankroll floor expressed as a fraction of the current bankroll.
+	// Bot shuts down entirely if balance falls below (bankroll × floor pct).
+	// e.g. 0.30 = stop if balance drops to 30% of starting bankroll (70% loss).
 	// Requires manual restart after investigating the cause.
-	BankrollFloor float64
+	// BANKROLL_FLOOR_PCT (default 0.30)
+	BankrollFloorPct float64
 }
 
 func Load() *Config {
@@ -155,7 +158,7 @@ func Load() *Config {
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
 		ConsecLossLimit: envInt("CONSEC_LOSS_LIMIT", 3),
-		BankrollFloor:   envFloat("BANKROLL_FLOOR", 2500.0),
+		BankrollFloorPct: envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }
 

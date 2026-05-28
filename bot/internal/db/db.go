@@ -113,6 +113,19 @@ func (d *DB) ActiveConditionIDs() (map[string]bool, error) {
 
 // ── Safety net queries ───────────────────────────────────────────────────────
 
+// GetAllTimePnL returns total net P&L across all resolved trades (paper + live).
+// Used to compute the current effective balance: bankroll + GetAllTimePnL().
+func (d *DB) GetAllTimePnL() (float64, error) {
+	var pnl float64
+	err := d.conn.QueryRow(`
+		SELECT COALESCE(SUM(net_pnl), 0)
+		FROM trades
+		WHERE outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
+		  AND net_pnl IS NOT NULL
+	`).Scan(&pnl)
+	return pnl, err
+}
+
 // GetTodayPnL returns the sum of resolved P&L for trades entered today (UTC).
 func (d *DB) GetTodayPnL() (float64, error) {
 	var pnl float64
