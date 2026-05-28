@@ -232,6 +232,21 @@ func main() {
 	}
 }
 
+// evictFromWatchlist removes a single market from the in-memory watchlist.
+// Called when order placement returns order_version_mismatch — the CLOB has
+// closed the market but hasn't updated accepting_orders yet. The market will be
+// naturally excluded on the next BuildWatchlist run (~10 min).
+func evictFromWatchlist(conditionID string) {
+	watchlistMu.Lock()
+	defer watchlistMu.Unlock()
+	for i, e := range watchlist {
+		if e.ConditionID == conditionID {
+			watchlist = append(watchlist[:i], watchlist[i+1:]...)
+			return
+		}
+	}
+}
+
 // ── Discovery loop ────────────────────────────────────────────────────────────
 
 // runDiscovery does a full market scan, resolves open trades, and rebuilds
@@ -347,6 +362,19 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 		if err := exec.PlaceOrder(ctx, *opp); err != nil {
 			log.Printf("[poll] order failed for %s: %v", opp.ConditionID[:12], err)
 
+			errStr := err.Error()
+
+			// order_version_mismatch means the market closed between the last
+			// discovery scan and now (CLOB still reports accepting_orders=true but
+			// rejects orders). Evict the market from the in-memory watchlist so we
+			// don't spam retries every 10 s; it will be excluded on the next full
+			// discovery scan when the CLOB marks it closed.
+			if strings.Contains(errStr, "order_version_mismatch") {
+				evictFromWatchlist(opp.ConditionID)
+				log.Printf("[poll] evicted closed market %s from watchlist (order_version_mismatch)", opp.ConditionID[:12])
+				continue
+			}
+
 			// Cooldown: only alert once per market per 5 minutes to prevent
 			// notification spam on repeated poll cycles.
 			orderFailMu.Lock()
@@ -355,7 +383,6 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				orderFailAt[opp.ConditionID] = time.Now()
 				orderFailMu.Unlock()
 
-				errStr := err.Error()
 				if strings.Contains(errStr, "insufficient") || strings.Contains(errStr, "balance") || strings.Contains(errStr, "funds") {
 					n.Broadcast(fmt.Sprintf(
 						"⚠️ ORDER SKIPPED — insufficient USDC\n%s · %s @ %.1f¢ · $%.2f\nDeposit more USDC or reduce position size.",
