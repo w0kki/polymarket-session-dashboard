@@ -234,15 +234,16 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 	return nil
 }
 
-// VerifyCredentials calls an authenticated CLOB endpoint to confirm the L2
-// credentials are valid before any real order is placed. Call this at startup
-// when DRY_RUN=false.
+// VerifyCredentials calls GET /auth/api-keys to confirm the L2 credentials are
+// valid before any real order is placed. Returns an error if the credentials
+// are rejected; a 200 with the key list means the API key is registered and the
+// HMAC secret + passphrase are correct.
 func (l *LiveExecutor) VerifyCredentials(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", clobBaseURL+"/auth/api-key", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", clobBaseURL+"/auth/api-keys", nil)
 	if err != nil {
 		return fmt.Errorf("verify creds: build request: %w", err)
 	}
-	l.setAuthHeaders(req, "GET", "/auth/api-key", "")
+	l.setAuthHeaders(req, "GET", "/auth/api-keys", "")
 
 	resp, err := l.client.Do(req)
 	if err != nil {
@@ -420,12 +421,13 @@ func (l *LiveExecutor) computeOrderHash(salt, tokenID *big.Int, makerAmt, takerA
 // ── L2 API auth headers ───────────────────────────────────────────────────────
 
 // setAuthHeaders adds the five Polymarket L2 authentication headers to req.
-// Signature = base64( HMAC-SHA256(timestamp+method+path+body, apiSecret) ).
+// Signature = base64url( HMAC-SHA256(timestamp+method+path+body, apiSecret) ).
+// Must use URL-safe base64 output to match the py-clob-client reference implementation.
 func (l *LiveExecutor) setAuthHeaders(req *http.Request, method, path, body string) {
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 	mac := hmac.New(sha256.New, l.apiSecret)
 	mac.Write([]byte(ts + method + path + body))
-	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	sig := base64.URLEncoding.EncodeToString(mac.Sum(nil))
 
 	req.Header.Set("POLY_ADDRESS",    l.address)
 	req.Header.Set("POLY_API_KEY",    l.apiKey)
