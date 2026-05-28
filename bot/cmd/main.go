@@ -327,8 +327,27 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 		return
 	}
 
+	// Stagger requests to avoid CLOB rate-limits (HTTP 429).
+	// Spread all markets evenly across the poll interval so the CLOB sees a
+	// steady trickle rather than a burst of 100+ requests fired simultaneously.
+	// e.g. 144 markets, 10s interval → ~69 ms between requests ≈ 14 req/s.
+	// Floor at 50 ms so a tiny watchlist doesn't spin too hot.
+	stagger := time.Duration(cfg.PollIntervalSec)*time.Second / time.Duration(len(entries))
+	if stagger < 50*time.Millisecond {
+		stagger = 50 * time.Millisecond
+	}
+
 	// Poll each watchlisted market.
-	for _, entry := range entries {
+	for i, entry := range entries {
+		// Sleep before every market except the first — spreads the burst.
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(stagger):
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
