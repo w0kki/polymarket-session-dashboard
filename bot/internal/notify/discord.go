@@ -16,12 +16,18 @@ type Notifier struct {
 	discord  *discordChannel
 	telegram *telegramChannel
 	client   *http.Client
+	mode     string // "PAPER" or "LIVE" — shown in every trade notification
 }
 
 // New constructs a Notifier. Pass empty strings to disable individual channels.
-func New(discordWebhookURL, telegramToken, telegramChatID string) *Notifier {
+// dryRun=true → mode label "PAPER"; false → "LIVE".
+func New(discordWebhookURL, telegramToken, telegramChatID string, dryRun bool) *Notifier {
+	mode := "LIVE"
+	if dryRun {
+		mode = "PAPER"
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	n := &Notifier{client: client}
+	n := &Notifier{client: client, mode: mode}
 	if discordWebhookURL != "" {
 		n.discord = &discordChannel{url: discordWebhookURL, client: client}
 	}
@@ -72,17 +78,16 @@ func polyURL(slug string) string {
 func (n *Notifier) TradePlaced(market, side, sport, slug string, price, size float64) {
 	url := polyURL(slug)
 	discord := fmt.Sprintf(
-		"📝 **TRADE PLACED** — Moneyline · %s\n[%s](%s)\n▶ %s @ %.1f¢ | Size: $%.2f",
-		sport, market, url, side, price*100, size,
+		"📝 **TRADE PLACED** — %s · Moneyline · %s\n[%s](%s)\n▶ %s @ %.1f¢ | Size: $%.2f",
+		n.mode, sport, market, url, side, price*100, size,
 	)
 	telegram := fmt.Sprintf(
-		"📝 <b>TRADE PLACED</b> — Moneyline · %s\n<a href=\"%s\">%s</a>\n▶ %s @ %.1f¢ | Size: $%.2f",
-		sport, url, market, side, price*100, size,
+		"📝 <b>TRADE PLACED</b> — %s · Moneyline · %s\n<a href=\"%s\">%s</a>\n▶ %s @ %.1f¢ | Size: $%.2f",
+		n.mode, sport, url, market, side, price*100, size,
 	)
 	if url == "" {
-		// No slug — fall back to plain text.
-		n.broadcast(fmt.Sprintf("📝 TRADE PLACED — Moneyline · %s\n%s\n▶ %s @ %.1f¢ | Size: $%.2f",
-			sport, market, side, price*100, size))
+		n.broadcast(fmt.Sprintf("📝 TRADE PLACED — %s · Moneyline · %s\n%s\n▶ %s @ %.1f¢ | Size: $%.2f",
+			n.mode, sport, market, side, price*100, size))
 		return
 	}
 	n.broadcastLink(discord, telegram)
@@ -94,18 +99,18 @@ func (n *Notifier) TradeResolved(market, side, outcome, slug string, pnl float64
 	url := polyURL(slug)
 	switch {
 	case outcome == "LOSS":
-		discord := fmt.Sprintf("📉 **LOSS** — Moneyline\n[%s](%s)\n▶ %s | P&L: -$%.2f", market, url, side, -pnl)
-		telegram := fmt.Sprintf("📉 <b>LOSS</b> — Moneyline\n<a href=\"%s\">%s</a>\n▶ %s | P&L: -$%.2f", url, market, side, -pnl)
+		discord := fmt.Sprintf("📉 **LOSS** — %s · Moneyline\n[%s](%s)\n▶ %s | P&L: -$%.2f", n.mode, market, url, side, -pnl)
+		telegram := fmt.Sprintf("📉 <b>LOSS</b> — %s · Moneyline\n<a href=\"%s\">%s</a>\n▶ %s | P&L: -$%.2f", n.mode, url, market, side, -pnl)
 		if url == "" {
-			n.broadcast(fmt.Sprintf("📉 LOSS — %s\n%s\nP&L: -$%.2f", side, market, -pnl))
+			n.broadcast(fmt.Sprintf("📉 LOSS — %s · %s\n%s\nP&L: -$%.2f", n.mode, side, market, -pnl))
 			return
 		}
 		n.broadcastLink(discord, telegram)
 	case outcome == "WIN" && pnl >= 5.0:
-		discord := fmt.Sprintf("✅ **WIN** — Moneyline\n[%s](%s)\n▶ %s | P&L: +$%.2f", market, url, side, pnl)
-		telegram := fmt.Sprintf("✅ <b>WIN</b> — Moneyline\n<a href=\"%s\">%s</a>\n▶ %s | P&L: +$%.2f", url, market, side, pnl)
+		discord := fmt.Sprintf("✅ **WIN** — %s · Moneyline\n[%s](%s)\n▶ %s | P&L: +$%.2f", n.mode, market, url, side, pnl)
+		telegram := fmt.Sprintf("✅ <b>WIN</b> — %s · Moneyline\n<a href=\"%s\">%s</a>\n▶ %s | P&L: +$%.2f", n.mode, url, market, side, pnl)
 		if url == "" {
-			n.broadcast(fmt.Sprintf("✅ WIN — %s\n%s\nP&L: +$%.2f", side, market, pnl))
+			n.broadcast(fmt.Sprintf("✅ WIN — %s · %s\n%s\nP&L: +$%.2f", n.mode, side, market, pnl))
 			return
 		}
 		n.broadcastLink(discord, telegram)
@@ -116,16 +121,16 @@ func (n *Notifier) TradeResolved(market, side, outcome, slug string, pnl float64
 func (n *Notifier) StopLossTriggered(market, side, sport, slug string, exitPrice, netPnl, saved float64) {
 	url := polyURL(slug)
 	discord := fmt.Sprintf(
-		"⛔ **STOP LOSS** — Moneyline · %s\n[%s](%s)\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f vs full loss",
-		sport, market, url, side, exitPrice*100, -netPnl, saved,
+		"⛔ **STOP LOSS** — %s · Moneyline · %s\n[%s](%s)\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f vs full loss",
+		n.mode, sport, market, url, side, exitPrice*100, -netPnl, saved,
 	)
 	telegram := fmt.Sprintf(
-		"⛔ <b>STOP LOSS</b> — Moneyline · %s\n<a href=\"%s\">%s</a>\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f vs full loss",
-		sport, url, market, side, exitPrice*100, -netPnl, saved,
+		"⛔ <b>STOP LOSS</b> — %s · Moneyline · %s\n<a href=\"%s\">%s</a>\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f vs full loss",
+		n.mode, sport, url, market, side, exitPrice*100, -netPnl, saved,
 	)
 	if url == "" {
-		n.broadcast(fmt.Sprintf("⛔ STOP LOSS (%s)\n%s\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f",
-			sport, market, side, exitPrice*100, -netPnl, saved))
+		n.broadcast(fmt.Sprintf("⛔ STOP LOSS — %s · %s\n%s\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f",
+			n.mode, sport, market, side, exitPrice*100, -netPnl, saved))
 		return
 	}
 	n.broadcastLink(discord, telegram)

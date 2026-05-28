@@ -43,7 +43,7 @@ func main() {
 	log.Printf("══════════════════════════════════════════════")
 
 	// ── Notifier ─────────────────────────────────────────────────────────────
-	notifier := notify.New(cfg.DiscordWebhookURL, cfg.TelegramBotToken, cfg.TelegramChatID)
+	notifier := notify.New(cfg.DiscordWebhookURL, cfg.TelegramBotToken, cfg.TelegramChatID, cfg.DryRun)
 	if notifier.Enabled() {
 		channels := ""
 		if cfg.DiscordWebhookURL != "" {
