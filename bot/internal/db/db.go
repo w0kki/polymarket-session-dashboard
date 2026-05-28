@@ -58,13 +58,12 @@ type TradeStats struct {
 func (d *DB) GetTradeStats() (*TradeStats, error) {
 	row := d.conn.QueryRow(`
 		SELECT
-			SUM(CASE WHEN outcome = 'WIN'  THEN 1 ELSE 0 END),
-			SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END),
-			AVG(CASE WHEN outcome = 'WIN'  AND pnl IS NOT NULL THEN pnl      END),
-			AVG(CASE WHEN outcome = 'LOSS' AND pnl IS NOT NULL THEN ABS(pnl) END)
+			SUM(CASE WHEN outcome = 'WIN'                        THEN 1 ELSE 0 END),
+			SUM(CASE WHEN outcome IN ('LOSS','STOP_LOSS')        THEN 1 ELSE 0 END),
+			AVG(CASE WHEN outcome = 'WIN'                 AND net_pnl IS NOT NULL THEN net_pnl        END),
+			AVG(CASE WHEN outcome IN ('LOSS','STOP_LOSS') AND net_pnl IS NOT NULL THEN ABS(net_pnl)   END)
 		FROM trades
-		WHERE outcome IN ('WIN', 'LOSS')
-		  AND trade_type = 'Paper'
+		WHERE outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
 	`)
 
 	var wins, losses sql.NullInt64
@@ -118,10 +117,10 @@ func (d *DB) ActiveConditionIDs() (map[string]bool, error) {
 func (d *DB) GetTodayPnL() (float64, error) {
 	var pnl float64
 	err := d.conn.QueryRow(`
-		SELECT COALESCE(SUM(pnl), 0)
+		SELECT COALESCE(SUM(COALESCE(net_pnl, pnl)), 0)
 		FROM trades
 		WHERE date = date('now')
-		  AND outcome IN ('WIN', 'LOSS')
+		  AND outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
 		  AND pnl IS NOT NULL
 	`).Scan(&pnl)
 	return pnl, err
@@ -134,7 +133,7 @@ func (d *DB) GetTodayPnL() (float64, error) {
 func (d *DB) GetConsecutiveLosses() (int, error) {
 	rows, err := d.conn.Query(`
 		SELECT outcome FROM trades
-		WHERE outcome IN ('WIN', 'LOSS') AND trade_type = 'Paper'
+		WHERE outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
 		ORDER BY updated_at DESC
 		LIMIT 20
 	`)
@@ -149,10 +148,10 @@ func (d *DB) GetConsecutiveLosses() (int, error) {
 		if err := rows.Scan(&outcome); err != nil {
 			return 0, err
 		}
-		if outcome != "LOSS" {
-			break
+		if outcome == "WIN" {
+			break // a win resets the streak
 		}
-		count++
+		count++ // LOSS and STOP_LOSS both count toward the streak
 	}
 	return count, rows.Err()
 }
@@ -196,7 +195,10 @@ type PaperTrade struct {
 // OpenPaperTrade is a paper trade that has not yet been resolved.
 type OpenPaperTrade struct {
 	ConditionID string
+	Market      string  // human-readable title
+	Sport       string
 	Side        string  // outcome label the bot bet on
+	EntryPrice  float64
 	Shares      float64
 	SizeUSDC    float64 // amount paid (cost basis)
 	BuyFee      float64
@@ -205,7 +207,8 @@ type OpenPaperTrade struct {
 // GetOpenPaperTrades returns all paper trades still awaiting resolution.
 func (d *DB) GetOpenPaperTrades() ([]OpenPaperTrade, error) {
 	rows, err := d.conn.Query(`
-		SELECT condition_id, side, shares, size_usdc, COALESCE(buy_fee, 0)
+		SELECT condition_id, COALESCE(market,''), COALESCE(sport,''),
+		       side, COALESCE(entry_price,0), shares, size_usdc, COALESCE(buy_fee, 0)
 		FROM trades
 		WHERE trade_type = 'Paper' AND outcome = 'NA'
 	`)
@@ -217,7 +220,8 @@ func (d *DB) GetOpenPaperTrades() ([]OpenPaperTrade, error) {
 	var out []OpenPaperTrade
 	for rows.Next() {
 		var t OpenPaperTrade
-		if err := rows.Scan(&t.ConditionID, &t.Side, &t.Shares, &t.SizeUSDC, &t.BuyFee); err != nil {
+		if err := rows.Scan(&t.ConditionID, &t.Market, &t.Sport,
+			&t.Side, &t.EntryPrice, &t.Shares, &t.SizeUSDC, &t.BuyFee); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -225,10 +229,30 @@ func (d *DB) GetOpenPaperTrades() ([]OpenPaperTrade, error) {
 	return out, rows.Err()
 }
 
+// StopLossPaperTrade marks a paper trade as exited early via stop loss.
+// Records the partial exit price, sell-side fee, and resulting P&L.
+func (d *DB) StopLossPaperTrade(conditionID string, exitPrice, sellFee, grossPnl, netPnlPct float64) error {
+	_, err := d.conn.Exec(`
+		UPDATE trades SET
+			outcome    = 'STOP_LOSS',
+			exit_price = ?,
+			sell_fee   = ?,
+			total_fees = COALESCE(buy_fee, 0) + ?,
+			pnl        = ?,
+			pnl_pct    = ?,
+			net_pnl    = ? - COALESCE(buy_fee, 0) - ?,
+			updated_at = datetime('now')
+		WHERE condition_id = ? AND trade_type = 'Paper' AND outcome = 'NA'
+	`, exitPrice, sellFee, sellFee, grossPnl, netPnlPct, grossPnl, sellFee, conditionID)
+	return err
+}
+
 // ResolvePaperTrade writes the final outcome, exit price, and P&L for a paper trade.
 // sell_fee is 0 for redemptions; net_pnl = pnl − buy_fee (already stored).
-func (d *DB) ResolvePaperTrade(conditionID, outcome string, exitPrice, pnl, pnlPct float64) error {
-	_, err := d.conn.Exec(`
+// Returns the number of rows updated (0 means the trade was already resolved — caller
+// must NOT send a notification in that case, or it will fire repeatedly).
+func (d *DB) ResolvePaperTrade(conditionID, outcome string, exitPrice, pnl, pnlPct float64) (int64, error) {
+	result, err := d.conn.Exec(`
 		UPDATE trades SET
 			outcome    = ?,
 			exit_price = ?,
@@ -238,7 +262,10 @@ func (d *DB) ResolvePaperTrade(conditionID, outcome string, exitPrice, pnl, pnlP
 			updated_at = datetime('now')
 		WHERE condition_id = ? AND trade_type = 'Paper' AND outcome = 'NA'
 	`, outcome, exitPrice, pnl, pnlPct, pnl, conditionID)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // InsertPaperTrade writes a paper trade to the shared trades table.
@@ -264,4 +291,101 @@ func (d *DB) InsertPaperTrade(t PaperTrade) error {
 		return fmt.Errorf("insert paper trade: %w", err)
 	}
 	return nil
+}
+
+// ── Live trade writes ─────────────────────────────────────────────────────────
+
+// InsertLiveTrade writes a real (CLOB-executed) trade to the DB immediately
+// after the order is placed. This ensures dedup, stop-loss monitoring, and
+// Kelly sizing all work without waiting for the hourly sync.js run.
+// trade_type mirrors what sync.js will write ('Risk Premia' or 'Latency Arb').
+func (d *DB) InsertLiveTrade(t PaperTrade) error {
+	if t.Date == "" {
+		t.Date = time.Now().UTC().Format("2006-01-02")
+	}
+	tradeType := "Risk Premia"
+	if t.EntryPrice < 0.5 {
+		tradeType = "Latency Arb"
+	}
+	_, err := d.conn.Exec(`
+		INSERT INTO trades (
+			condition_id, date, market, slug, sport, trade_type, side,
+			entry_price, shares, size_usdc, outcome,
+			buy_fee, sell_fee, total_fees, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NA', ?, 0, ?, datetime('now'))
+		ON CONFLICT(condition_id) DO NOTHING
+	`,
+		t.ConditionID, t.Date, t.Market, t.Slug, t.Sport, tradeType,
+		t.Side, t.EntryPrice, t.Shares, t.SizeUSDC,
+		t.BuyFee, t.BuyFee,
+	)
+	if err != nil {
+		return fmt.Errorf("insert live trade: %w", err)
+	}
+	return nil
+}
+
+// GetOpenLiveTrades returns all real (non-paper) trades still awaiting resolution.
+func (d *DB) GetOpenLiveTrades() ([]OpenPaperTrade, error) {
+	rows, err := d.conn.Query(`
+		SELECT condition_id, COALESCE(market,''), COALESCE(sport,''),
+		       side, COALESCE(entry_price,0), shares, size_usdc, COALESCE(buy_fee, 0)
+		FROM trades
+		WHERE trade_type IN ('Risk Premia', 'Latency Arb') AND outcome = 'NA'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get open live trades: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OpenPaperTrade
+	for rows.Next() {
+		var t OpenPaperTrade
+		if err := rows.Scan(&t.ConditionID, &t.Market, &t.Sport,
+			&t.Side, &t.EntryPrice, &t.Shares, &t.SizeUSDC, &t.BuyFee); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// StopLossLiveTrade marks a live trade as exited early via stop loss.
+func (d *DB) StopLossLiveTrade(conditionID string, exitPrice, sellFee, grossPnl, netPnlPct float64) error {
+	_, err := d.conn.Exec(`
+		UPDATE trades SET
+			outcome    = 'STOP_LOSS',
+			exit_price = ?,
+			sell_fee   = ?,
+			total_fees = COALESCE(buy_fee, 0) + ?,
+			pnl        = ?,
+			pnl_pct    = ?,
+			net_pnl    = ? - COALESCE(buy_fee, 0) - ?,
+			updated_at = datetime('now')
+		WHERE condition_id = ?
+		  AND trade_type IN ('Risk Premia', 'Latency Arb')
+		  AND outcome = 'NA'
+	`, exitPrice, sellFee, sellFee, grossPnl, netPnlPct, grossPnl, sellFee, conditionID)
+	return err
+}
+
+// ResolveLiveTrade writes the final outcome for a real trade. Returns rows
+// affected so the caller can suppress duplicate notifications (0 = already done).
+func (d *DB) ResolveLiveTrade(conditionID, outcome string, exitPrice, pnl, pnlPct float64) (int64, error) {
+	result, err := d.conn.Exec(`
+		UPDATE trades SET
+			outcome    = ?,
+			exit_price = ?,
+			pnl        = ?,
+			pnl_pct    = ?,
+			net_pnl    = ? - COALESCE(buy_fee, 0),
+			updated_at = datetime('now')
+		WHERE condition_id = ?
+		  AND trade_type IN ('Risk Premia', 'Latency Arb')
+		  AND outcome = 'NA'
+	`, outcome, exitPrice, pnl, pnlPct, pnl, conditionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

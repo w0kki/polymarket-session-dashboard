@@ -71,6 +71,7 @@ type Opportunity struct {
 	Slug        string
 	Sport       string
 	Side        string  // winning outcome label, e.g. "Arizona Diamondbacks"
+	TokenID     string  // CLOB token_id — required for live order placement
 	Price       float64 // token price (e.g. 0.94)
 	Shares      float64 // position_size / price
 	SizeUSDC    float64 // final position size after Kelly + cap
@@ -80,10 +81,12 @@ type Opportunity struct {
 // ── Scanner ───────────────────────────────────────────────────────────────────
 
 // SportBounds overrides the global entry threshold and max price for a specific
-// sport. Both fields are optional: a zero value means "use the global default".
+// sport. All fields are optional: a zero value means "use the global default".
 type SportBounds struct {
-	MinPrice float64 // 0 = use global EntryThreshold
-	MaxPrice float64 // 0 = use global MaxEntryPrice
+	MinPrice        float64 // 0 = use global EntryThreshold
+	MaxPrice        float64 // 0 = use global MaxEntryPrice
+	MaxHoursToClose float64 // 0 = no restriction; >0 = only trade when this many hours or less remain
+	//                         Soccer example: 0.5 = only trade in final 30 min ≈ 70th minute onward
 }
 
 type Scanner struct {
@@ -165,6 +168,24 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		return nil, nil // market has expired or closed since last discovery
 	}
 
+	// Per-sport time window — e.g. Soccer only trades in final 30 min (≈70th minute onward).
+	// Uses EndDateISO as a proxy: if more time remains than the sport's MaxHoursToClose, skip.
+	if bounds, ok := s.sportBounds[entry.Sport]; ok && bounds.MaxHoursToClose > 0 {
+		if m.EndDateISO != "" {
+			endTime, err := time.Parse(time.RFC3339, m.EndDateISO)
+			if err != nil {
+				t2, err2 := time.Parse("2006-01-02", m.EndDateISO)
+				if err2 == nil {
+					endTime = t2.Add(24 * time.Hour)
+					err = nil
+				}
+			}
+			if err == nil && time.Until(endTime).Hours() > bounds.MaxHoursToClose {
+				return nil, nil // not yet in the trading window for this sport
+			}
+		}
+	}
+
 	side, price := bestOutcome(*m)
 	if side == "" {
 		return nil, nil
@@ -204,12 +225,22 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 	size := min64(rawSize, s.maxSize)
 	shares := size / price
 
+	// Look up the token_id for the winning side — required for live order placement.
+	tokenID := ""
+	for _, tok := range m.Tokens {
+		if tok.Outcome == side {
+			tokenID = tok.TokenID
+			break
+		}
+	}
+
 	return &Opportunity{
 		ConditionID: m.ConditionID,
 		Market:      m.Question,
 		Slug:        m.MarketSlug,
 		Sport:       entry.Sport,
 		Side:        side,
+		TokenID:     tokenID,
 		Price:       price,
 		Shares:      shares,
 		SizeUSDC:    size,
@@ -439,6 +470,45 @@ func (s *Scanner) fetchMarkets() ([]clobMarket, error) {
 		cursor = page_resp.NextCursor
 	}
 	return all, nil
+}
+
+// GetSidePrice fetches a market and returns the current price for a specific
+// outcome label (the side the bot is holding). Returns marketOpen=false when
+// the market has settled or is no longer accepting orders — the caller should
+// let the normal resolve loop handle those.
+func (s *Scanner) GetSidePrice(conditionID, side string) (price float64, marketOpen bool, err error) {
+	m, err := s.CheckMarket(conditionID)
+	if err != nil {
+		return 0, false, err
+	}
+	if !m.Active || m.Closed || !m.AcceptingOrders {
+		return 0, false, nil // settled — let resolveOpenTrades handle it
+	}
+	for _, tok := range m.Tokens {
+		if tok.Outcome == side {
+			return tok.Price, true, nil
+		}
+	}
+	return 0, true, nil // market open but side not found
+}
+
+// GetSidePriceAndToken fetches a market and returns the current price AND the
+// CLOB token_id for the given outcome. Used by the live stop-loss handler to
+// build a SELL order without needing to store the token_id at trade time.
+func (s *Scanner) GetSidePriceAndToken(conditionID, side string) (price float64, tokenID string, marketOpen bool, err error) {
+	m, err := s.CheckMarket(conditionID)
+	if err != nil {
+		return 0, "", false, err
+	}
+	if !m.Active || m.Closed || !m.AcceptingOrders {
+		return 0, "", false, nil
+	}
+	for _, tok := range m.Tokens {
+		if tok.Outcome == side {
+			return tok.Price, tok.TokenID, true, nil
+		}
+	}
+	return 0, "", true, nil
 }
 
 // CheckMarket fetches a single market by condition ID from the CLOB API.

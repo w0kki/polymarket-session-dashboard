@@ -100,12 +100,32 @@ const upsertTrade = db.prepare(`
     date         = excluded.date,
     market       = excluded.market,
     exit_price   = excluded.exit_price,
-    outcome      = excluded.outcome,
-    pnl          = excluded.pnl,
-    pnl_pct      = excluded.pnl_pct,
+    -- Paper: never overwrite (bot owns paper outcomes).
+    -- Live:  never overwrite a resolved outcome with 'NA' (bot may have already
+    --        resolved it via resolveLiveTrades before the hourly sync runs).
+    --        If sync has a definitive outcome (not 'NA'), always accept it.
+    outcome      = CASE
+                     WHEN trades.trade_type = 'Paper'                        THEN trades.outcome
+                     WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.outcome
+                     ELSE excluded.outcome
+                   END,
+    pnl          = CASE
+                     WHEN trades.trade_type = 'Paper'                        THEN trades.pnl
+                     WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.pnl
+                     ELSE excluded.pnl
+                   END,
+    pnl_pct      = CASE
+                     WHEN trades.trade_type = 'Paper'                        THEN trades.pnl_pct
+                     WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.pnl_pct
+                     ELSE excluded.pnl_pct
+                   END,
+    net_pnl      = CASE
+                     WHEN trades.trade_type = 'Paper'                        THEN trades.net_pnl
+                     WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.net_pnl
+                     ELSE excluded.net_pnl
+                   END,
     sell_fee     = excluded.sell_fee,
     total_fees   = excluded.total_fees,
-    net_pnl      = excluded.net_pnl,
     updated_at   = datetime('now')
 `);
 
@@ -128,20 +148,21 @@ export function getTrades({ sport, outcome, from, to, limit = 500 } = {}) {
 export function getTradeStats() {
   return db.prepare(`
     SELECT
-      COUNT(*)                                    AS total_trades,
-      SUM(CASE WHEN outcome = 'WIN'  THEN 1 ELSE 0 END) AS wins,
-      SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) AS losses,
-      ROUND(SUM(pnl), 4)                          AS total_pnl,
-      ROUND(SUM(net_pnl), 4)                      AS total_net_pnl,
-      ROUND(SUM(total_fees), 4)                   AS total_fees,
-      ROUND(AVG(CASE WHEN outcome = 'WIN'  THEN pnl END), 4) AS avg_win,
-      ROUND(AVG(CASE WHEN outcome = 'LOSS' THEN pnl END), 4) AS avg_loss,
-      ROUND(MAX(pnl), 4)                          AS largest_win,
-      ROUND(MIN(pnl), 4)                          AS largest_loss,
+      COUNT(*)                                                          AS total_trades,
+      SUM(CASE WHEN outcome = 'WIN'                    THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN outcome IN ('LOSS','STOP_LOSS')    THEN 1 ELSE 0 END) AS losses,
+      SUM(CASE WHEN outcome = 'STOP_LOSS'              THEN 1 ELSE 0 END) AS stop_losses,
+      ROUND(SUM(COALESCE(net_pnl, pnl)), 4)                           AS total_pnl,
+      ROUND(SUM(net_pnl), 4)                                          AS total_net_pnl,
+      ROUND(SUM(total_fees), 4)                                       AS total_fees,
+      ROUND(AVG(CASE WHEN outcome = 'WIN'                 THEN net_pnl END), 4) AS avg_win,
+      ROUND(AVG(CASE WHEN outcome IN ('LOSS','STOP_LOSS') THEN net_pnl END), 4) AS avg_loss,
+      ROUND(MAX(CASE WHEN outcome = 'WIN'                 THEN net_pnl END), 4) AS largest_win,
+      ROUND(MIN(CASE WHEN outcome IN ('LOSS','STOP_LOSS') THEN net_pnl END), 4) AS largest_loss,
       sport,
       COUNT(*) AS trades_by_sport
     FROM trades
-    WHERE outcome IN ('WIN','LOSS')
+    WHERE outcome IN ('WIN','LOSS','STOP_LOSS')
   `).get();
 }
 
