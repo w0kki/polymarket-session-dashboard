@@ -58,7 +58,11 @@ export function computeStats(positions: Position[], activity: Activity[]): Sessi
   const sellLosses    = Object.entries(soldMap).filter(
     ([cid, received]) => !redeemedIds.has(cid) && received < (buyCost[cid] ?? 0)
   ).length;
-  const totalLosses   = redeemLosses + sellLosses;
+  // Positions at 0¢ that haven't been officially settled yet — count them as losses now.
+  const deadLosses    = positions.filter(
+    p => p.curPrice <= 0.001 && !redeemedIds.has(p.conditionId)
+  ).length;
+  const totalLosses   = redeemLosses + sellLosses + deadLosses;
 
   const totalRealizedPnl = redeemedPnl + sellPnl;
   const totalPnl = totalRealizedPnl + unrealizedPnl;
@@ -178,6 +182,10 @@ export function buildTradeLogRows(positions: Position[], activity: Activity[]): 
         exit    = 1.00;
         outcome = 'WIN';
         pnl     = pos.cashPnl;
+      } else if (pos.curPrice <= 0.001) {
+        exit    = 0.0;
+        outcome = 'LOSS';
+        pnl     = -cost;
       } else {
         exit    = null;
         outcome = 'NA';
