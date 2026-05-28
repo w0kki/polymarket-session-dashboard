@@ -39,6 +39,12 @@ type Config struct {
 	BaseballMinPrice float64
 	BaseballMaxPrice float64
 
+	// Hockey: high-variance sport — starting conservatively at 95¢+ until
+	// enough data is accumulated to tune the bounds.
+	// HOCKEY_MIN_PRICE (default 0.95), HOCKEY_MAX_PRICE (default 0.97)
+	HockeyMinPrice float64
+	HockeyMaxPrice float64
+
 	// Hard cap on position size regardless of Kelly output ($30).
 	MaxPositionSize float64
 
@@ -90,6 +96,8 @@ func Load() *Config {
 		TennisMaxPrice:  envFloat("TENNIS_MAX_PRICE", 0.97),
 		BaseballMinPrice: envFloat("BASEBALL_MIN_PRICE", 0.94),
 		BaseballMaxPrice: envFloat("BASEBALL_MAX_PRICE", 0.955),
+		HockeyMinPrice:   envFloat("HOCKEY_MIN_PRICE", 0.95),
+		HockeyMaxPrice:   envFloat("HOCKEY_MAX_PRICE", 0.97),
 		MaxPositionSize: envFloat("MAX_POSITION_SIZE", 30.0),
 		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
 		MinHoursToClose: envFloat("MIN_HOURS_TO_CLOSE", 0.0),

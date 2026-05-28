@@ -76,10 +76,15 @@ func main() {
 			MinPrice: cfg.BaseballMinPrice,
 			MaxPrice: cfg.BaseballMaxPrice,
 		},
+		"Hockey": {
+			MinPrice: cfg.HockeyMinPrice,
+			MaxPrice: cfg.HockeyMaxPrice,
+		},
 	}
-	log.Printf("  Tennis:    %.0f¢–%.0f¢  Baseball: %.0f¢–%.0f¢",
+	log.Printf("  Tennis:    %.0f¢–%.0f¢  Baseball: %.0f¢–%.0f¢  Hockey: %.0f¢–%.0f¢",
 		cfg.TennisMinPrice*100, cfg.TennisMaxPrice*100,
 		cfg.BaseballMinPrice*100, cfg.BaseballMaxPrice*100,
+		cfg.HockeyMinPrice*100, cfg.HockeyMaxPrice*100,
 	)
 
 	scanner := market.NewScanner(
