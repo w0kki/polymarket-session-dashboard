@@ -95,9 +95,33 @@ func main() {
 		log.Printf("  Effective mode: %s", mode)
 	}
 
+	// ── Signal handling ───────────────────────────────────────────────────────
+	// Set up early so ctx is available for both the halted path and the normal
+	// trading path below.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// ── Kill-switch check ─────────────────────────────────────────────────────
+	// If /kill was issued, the bot restarts itself via SIGTERM and re-enters
+	// this block in "halted" mode: only the Telegram listener runs, no trading.
+	// /startup clears the flag and triggers another restart → normal operation.
+	// pm2 always has a live process (crash recovery still works) but all
+	// trading is frozen until explicitly resumed.
+	if killed, _ := database.GetSetting("bot_killed"); killed == "true" {
+		log.Printf("  [HALTED] Kill switch active — Telegram listener only, no trading")
+		if notifier.Enabled() {
+			notifier.Broadcast("🔴 Bot is HALTED — trading suspended.\nSend /startup to resume.")
+		}
+		notifier.ListenCommands(ctx, makeCmdHandler(cfg, database, notifier))
+		<-ctx.Done()
+		log.Println("shutting down (halted mode)")
+		return
+	}
+
 	// ── Startup notification ──────────────────────────────────────────────────
 	// Send a brief ping so the operator knows the bot came back up after a
-	// restart. Fires after mode_override is applied so the label is accurate.
+	// restart. Fires after mode_override and kill-switch checks so the label
+	// is accurate and only fires when actually entering trading mode.
 	if notifier.Enabled() {
 		modeLabel := "📋 PAPER"
 		if !cfg.DryRun {
@@ -177,10 +201,6 @@ func main() {
 		cfg.MinVolume,
 		sportBounds,
 	)
-
-	// ── Signal handling ───────────────────────────────────────────────────────
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// ── Telegram command listener ─────────────────────────────────────────────
 	notifier.ListenCommands(ctx, makeCmdHandler(cfg, database, notifier))
@@ -733,6 +753,32 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 				old, amount, cfg.BankrollFloorPct*100, floor, amount,
 			))
 
+		case "kill":
+			// Hard halt: set the killed flag then restart via SIGTERM.
+			// pm2 will bring the process back up, but it will see the flag
+			// and enter halted mode (Telegram listener only — no trading).
+			// Resume with /startup or by SSH-ing in and running:
+			//   sqlite3 /home/ubuntu/app/trades.db "DELETE FROM settings WHERE key='bot_killed';"
+			//   pm2 restart polymarket-bot
+			if err := database.SetSetting("bot_killed", "true"); err != nil {
+				n.Broadcast("❌ Failed to set kill switch: " + err.Error())
+				return
+			}
+			n.Broadcast("🔴 KILL SWITCH ACTIVATED — trading halted.\npm2 will keep the process alive but dormant.\nSend /startup to resume trading.")
+			log.Println("[cmd] kill switch activated via Telegram — entering halted mode")
+			selfSignal()
+
+		case "startup":
+			// Clear the killed flag and restart — bot will re-enter main() and
+			// skip the halted branch, resuming normal trading.
+			if err := database.SetSetting("bot_killed", ""); err != nil {
+				n.Broadcast("❌ Failed to clear kill switch: " + err.Error())
+				return
+			}
+			n.Broadcast("🟢 Kill switch cleared — resuming trading now...")
+			log.Println("[cmd] startup requested via Telegram — clearing halted mode")
+			selfSignal()
+
 		case "stop":
 			n.Broadcast("🛑 Bot stopping on Telegram command. pm2 will restart it in paper mode.")
 			log.Println("[cmd] stop requested via Telegram")
@@ -784,7 +830,9 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 					"/clearbreaker — clear circuit breaker\n"+
 					"/live — switch to live trading\n"+
 					"/paper — switch to paper trading\n"+
-					"/stop — graceful shutdown",
+					"/kill — halt all trading (bot stays alive, dormant)\n"+
+					"/startup — resume trading after /kill\n"+
+					"/stop — graceful shutdown (pm2 restarts automatically)",
 				cmd,
 			))
 		}
