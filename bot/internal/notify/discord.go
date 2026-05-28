@@ -177,7 +177,10 @@ type discordChannel struct {
 }
 
 func (d *discordChannel) send(content string) {
-	payload := map[string]string{"content": content}
+	payload := map[string]interface{}{
+		"content": content,
+		"flags":   4, // SUPPRESS_EMBEDS
+	}
 	body, _ := json.Marshal(payload)
 	resp, err := d.client.Post(d.url, "application/json", bytes.NewReader(body))
 	if err != nil {
