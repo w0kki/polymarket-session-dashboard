@@ -35,11 +35,18 @@ func main() {
 	log.Printf("══════════════════════════════════════════════")
 
 	// ── Notifier ─────────────────────────────────────────────────────────────
-	notifier := notify.New(cfg.DiscordWebhookURL)
+	notifier := notify.New(cfg.DiscordWebhookURL, cfg.TelegramBotToken, cfg.TelegramChatID)
 	if notifier.Enabled() {
-		log.Printf("  Notifications: Discord ✓")
+		channels := ""
+		if cfg.DiscordWebhookURL != "" {
+			channels += "Discord "
+		}
+		if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+			channels += "Telegram"
+		}
+		log.Printf("  Notifications: %s✓", channels)
 	} else {
-		log.Printf("  Notifications: disabled (set DISCORD_WEBHOOK_URL to enable)")
+		log.Printf("  Notifications: disabled")
 	}
 
 	// ── Database ──────────────────────────────────────────────────────────────

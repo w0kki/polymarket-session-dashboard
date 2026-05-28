@@ -56,9 +56,10 @@ type Config struct {
 	// Path to the shared SQLite database.
 	DBPath string
 
-	// Discord webhook URL for trade/safety-net alerts.
-	// Leave empty to disable notifications.
-	DiscordWebhookURL string
+	// Notification channels — leave empty to disable.
+	DiscordWebhookURL string // DISCORD_WEBHOOK_URL
+	TelegramBotToken  string // TELEGRAM_BOT_TOKEN
+	TelegramChatID    string // TELEGRAM_CHAT_ID
 
 	// Fallback position size when Kelly can't be computed (not enough
 	// loss data yet). Kelly requires at least one loss to calculate b.
@@ -93,8 +94,10 @@ func Load() *Config {
 		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
 		MinHoursToClose: envFloat("MIN_HOURS_TO_CLOSE", 0.0),
 		MaxHoursToClose: envFloat("MAX_HOURS_TO_CLOSE", 0.0),
-		DBPath:              envString("DB_PATH", "../trades.db"),
-		DiscordWebhookURL:   envString("DISCORD_WEBHOOK_URL", ""),
+		DBPath:            envString("DB_PATH", "../trades.db"),
+		DiscordWebhookURL: envString("DISCORD_WEBHOOK_URL", ""),
+		TelegramBotToken:  envString("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChatID:    envString("TELEGRAM_CHAT_ID", ""),
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
 		ConsecLossLimit: envInt("CONSEC_LOSS_LIMIT", 3),
