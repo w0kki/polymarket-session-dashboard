@@ -13,8 +13,15 @@ type Config struct {
 	// DryRun=true → paper trading (default). Set DRY_RUN=false to go live.
 	DryRun bool
 
-	// How often the bot scans for new opportunities (seconds).
+	// How often the bot runs a full market discovery scan to rebuild the
+	// watchlist of active games (seconds). Default 600 = every 10 minutes.
+	// This is the slow loop — it paginates all 157k markets.
 	ScanIntervalSec int
+
+	// How often the bot polls each watchlisted market for a qualifying price
+	// (seconds). Default 10 = every 10 seconds.
+	// This is the fast loop — single HTTP request per market.
+	PollIntervalSec int
 
 	// Minimum token price to enter a trade (global default across all sports).
 	EntryThreshold float64
@@ -89,7 +96,8 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		DryRun:          envBool("DRY_RUN", true),
-		ScanIntervalSec: envInt("SCAN_INTERVAL_SEC", 30),
+		ScanIntervalSec: envInt("SCAN_INTERVAL_SEC", 600),
+		PollIntervalSec: envInt("POLL_INTERVAL_SEC", 10),
 		EntryThreshold:  envFloat("ENTRY_THRESHOLD", 0.94),
 		MaxEntryPrice:   envFloat("MAX_ENTRY_PRICE", 0.97),
 		TennisMinPrice:  envFloat("TENNIS_MIN_PRICE", 0.96),

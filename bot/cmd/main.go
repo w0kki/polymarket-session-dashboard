@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,6 +15,13 @@ import (
 	"github.com/w0kki/polymarket-bot/internal/kelly"
 	"github.com/w0kki/polymarket-bot/internal/market"
 	"github.com/w0kki/polymarket-bot/internal/notify"
+)
+
+// watchlist holds markets that passed all structural filters. Rebuilt by the
+// slow discovery loop; read by the fast poll loop.
+var (
+	watchlistMu sync.RWMutex
+	watchlist   []market.WatchlistEntry
 )
 
 func main() {
@@ -29,8 +37,8 @@ func main() {
 	log.Printf("══════════════════════════════════════════════")
 	log.Printf("  Polymarket Risk Premia Bot — %s MODE", mode)
 	log.Printf("  Sports:    %v", cfg.Sports)
-	log.Printf("  Threshold: %.0f¢  Cap: $%.0f  Interval: %ds",
-		cfg.EntryThreshold*100, cfg.MaxPositionSize, cfg.ScanIntervalSec)
+	log.Printf("  Threshold: %.0f¢  Cap: $%.0f", cfg.EntryThreshold*100, cfg.MaxPositionSize)
+	log.Printf("  Discovery: every %ds  Poll: every %ds", cfg.ScanIntervalSec, cfg.PollIntervalSec)
 	log.Printf("  DB:        %s", cfg.DBPath)
 	log.Printf("══════════════════════════════════════════════")
 
@@ -65,8 +73,6 @@ func main() {
 	}
 
 	// ── Scanner ───────────────────────────────────────────────────────────────
-	// Build per-sport price bounds from config.
-	// Sports not listed here fall back to the global EntryThreshold/MaxEntryPrice.
 	sportBounds := map[string]market.SportBounds{
 		"Tennis": {
 			MinPrice: cfg.TennisMinPrice,
@@ -81,7 +87,7 @@ func main() {
 			MaxPrice: cfg.HockeyMaxPrice,
 		},
 	}
-	log.Printf("  Tennis:    %.0f¢–%.0f¢  Baseball: %.0f¢–%.0f¢  Hockey: %.0f¢–%.0f¢",
+	log.Printf("  Tennis: %.0f¢–%.0f¢  Baseball: %.0f¢–%.0f¢  Hockey: %.0f¢–%.0f¢",
 		cfg.TennisMinPrice*100, cfg.TennisMaxPrice*100,
 		cfg.BaseballMinPrice*100, cfg.BaseballMaxPrice*100,
 		cfg.HockeyMinPrice*100, cfg.HockeyMaxPrice*100,
@@ -97,20 +103,30 @@ func main() {
 		sportBounds,
 	)
 
-	// ── Run loop ──────────────────────────────────────────────────────────────
+	// ── Signal handling ───────────────────────────────────────────────────────
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Run immediately on start, then on the configured interval.
-	tick := time.NewTicker(time.Duration(cfg.ScanIntervalSec) * time.Second)
-	defer tick.Stop()
+	// ── Two-speed loop ────────────────────────────────────────────────────────
+	// 1. Discovery (slow): full market scan → rebuilds watchlist + resolves trades
+	// 2. Poll (fast): checks each watchlisted market for a qualifying price
+	//
+	// Discovery runs first so the watchlist is populated before polling starts.
+	log.Printf("[discovery] initial scan starting...")
+	runDiscovery(ctx, cfg, database, scanner, notifier)
 
-	runScan(ctx, cfg, database, scanner, exec, notifier)
+	discoveryTicker := time.NewTicker(time.Duration(cfg.ScanIntervalSec) * time.Second)
+	pollTicker := time.NewTicker(time.Duration(cfg.PollIntervalSec) * time.Second)
+	defer discoveryTicker.Stop()
+	defer pollTicker.Stop()
 
 	for {
 		select {
-		case <-tick.C:
-			runScan(ctx, cfg, database, scanner, exec, notifier)
+		case <-discoveryTicker.C:
+			// Run in a goroutine so it doesn't block the poll ticker.
+			go runDiscovery(ctx, cfg, database, scanner, notifier)
+		case <-pollTicker.C:
+			runPoll(ctx, cfg, database, scanner, exec, notifier)
 		case <-ctx.Done():
 			log.Println("shutting down")
 			return
@@ -118,34 +134,138 @@ func main() {
 	}
 }
 
-// checkSafetyNets enforces the three trading halts.
-// Returns true if trading should be skipped this scan.
-//
-//  1. Bankroll floor   — shuts the process down entirely (log.Fatalf).
-//  2. Circuit breaker  — 24-hour pause after N consecutive losses.
-//  3. Daily loss limit — halts for the rest of the calendar day.
+// ── Discovery loop ────────────────────────────────────────────────────────────
+
+// runDiscovery does a full market scan, resolves open trades, and rebuilds
+// the watchlist. Runs every ~10 minutes (SCAN_INTERVAL_SEC).
+func runDiscovery(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, n *notify.Notifier) {
+	log.Println("── discovery start ──")
+
+	// Resolve any open paper trades first.
+	resolveOpenTrades(ctx, database, scanner, n)
+
+	// Build dedup sets for watchlist filtering.
+	traded, err := database.ActiveConditionIDs()
+	if err != nil {
+		log.Printf("[discovery] active positions error: %v", err)
+		traded = map[string]bool{}
+	}
+
+	// Full market scan — no price filtering, just structural filters.
+	entries, err := scanner.BuildWatchlist(traded, traded)
+	if err != nil {
+		log.Printf("[discovery] watchlist build error: %v", err)
+		log.Println("── discovery end (error) ──")
+		return
+	}
+
+	watchlistMu.Lock()
+	watchlist = entries
+	watchlistMu.Unlock()
+
+	log.Printf("[discovery] watchlist: %d markets ready to poll", len(entries))
+	log.Println("── discovery end ──")
+}
+
+// ── Poll loop ─────────────────────────────────────────────────────────────────
+
+// runPoll checks every market on the watchlist for a qualifying price and
+// executes trades when the threshold is crossed. Runs every 10s (POLL_INTERVAL_SEC).
+func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, exec executor.Executor, n *notify.Notifier) {
+	// Snapshot the watchlist under read lock.
+	watchlistMu.RLock()
+	entries := make([]market.WatchlistEntry, len(watchlist))
+	copy(entries, watchlist)
+	watchlistMu.RUnlock()
+
+	if len(entries) == 0 {
+		return // discovery hasn't run yet
+	}
+
+	// Load bankroll and compute Kelly sizing.
+	bankroll, err := database.GetBankroll()
+	if err != nil || bankroll <= 0 {
+		bankroll = cfg.FallbackSize * 3
+	}
+
+	stats, err := database.GetTradeStats()
+	if err != nil {
+		stats = &db.TradeStats{}
+	}
+	kellyResult := kelly.Compute(
+		stats.Wins, stats.Losses,
+		stats.AvgWin, stats.AvgLoss,
+		bankroll, cfg.MaxPositionSize, cfg.FallbackSize,
+	)
+	sizer := func(_ float64) float64 { return kellyResult.PositionSize }
+
+	// Check safety nets before entering any new positions.
+	if checkSafetyNets(cfg, database, bankroll, n) {
+		return
+	}
+
+	// Poll each watchlisted market.
+	for _, entry := range entries {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Dedup: skip if already traded (catches trades placed since last discovery).
+		already, err := database.IsAlreadyTraded(entry.ConditionID)
+		if err != nil {
+			log.Printf("[poll] dedup error for %s: %v", entry.ConditionID[:12], err)
+			continue
+		}
+		if already {
+			continue
+		}
+
+		opp, err := scanner.PollOpportunity(entry, sizer)
+		if err != nil {
+			// Log quietly — poll errors are expected for closed/expired markets.
+			log.Printf("[poll] %s: %v", entry.ConditionID[:12], err)
+			continue
+		}
+		if opp == nil {
+			continue // price doesn't qualify right now
+		}
+
+		// Price qualifies — execute.
+		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f",
+			opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC)
+
+		if err := exec.PlaceOrder(ctx, *opp); err != nil {
+			log.Printf("[poll] order failed for %s: %v", opp.ConditionID[:12], err)
+			continue
+		}
+		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Price, opp.SizeUSDC)
+	}
+}
+
+// ── Safety nets ───────────────────────────────────────────────────────────────
+
 func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64, n *notify.Notifier) bool {
-	// 1. Bankroll floor — hard stop, requires manual restart
+	// 1. Bankroll floor — hard stop, requires manual restart.
 	if bankroll > 0 && bankroll < cfg.BankrollFloor {
 		n.BankrollFloor(bankroll, cfg.BankrollFloor)
 		log.Fatalf(
-			"[safety] 🚨 BANKROLL FLOOR BREACHED — balance $%.2f < floor $%.2f — SHUTTING DOWN. Investigate before restarting.",
+			"[safety] 🚨 BANKROLL FLOOR BREACHED — balance $%.2f < floor $%.2f — SHUTTING DOWN.",
 			bankroll, cfg.BankrollFloor,
 		)
 	}
 
-	// 2. Consecutive loss circuit breaker — check if one is already active
+	// 2. Circuit breaker — check if one is already active.
 	expiry, err := database.GetSetting("circuit_breaker_until")
 	if err != nil {
 		log.Printf("[safety] circuit breaker read error: %v", err)
 	} else if expiry != "" {
 		t, err := time.Parse(time.RFC3339, expiry)
 		if err == nil && time.Now().UTC().Before(t) {
-			log.Printf("[safety] ⏸  CIRCUIT BREAKER ACTIVE — trading paused until %s UTC",
-				t.Format("2006-01-02 15:04"))
+			log.Printf("[safety] ⏸ CIRCUIT BREAKER ACTIVE until %s UTC", t.Format("2006-01-02 15:04"))
 			return true
 		}
-		// Breaker expired — clear it so the log stays clean
 		if err == nil && time.Now().UTC().After(t) {
 			_ = database.SetSetting("circuit_breaker_until", "")
 			log.Printf("[safety] circuit breaker expired — trading resumed")
@@ -153,7 +273,7 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64, n *n
 		}
 	}
 
-	// Check whether we should trip a new circuit breaker
+	// Trip a new circuit breaker if needed.
 	consec, err := database.GetConsecutiveLosses()
 	if err != nil {
 		log.Printf("[safety] consecutive loss check error: %v", err)
@@ -162,19 +282,19 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64, n *n
 		if err := database.SetSetting("circuit_breaker_until", until.Format(time.RFC3339)); err != nil {
 			log.Printf("[safety] failed to set circuit breaker: %v", err)
 		} else {
-			log.Printf("[safety] 🚨 CIRCUIT BREAKER TRIPPED — %d consecutive losses — trading paused until %s UTC",
+			log.Printf("[safety] 🚨 CIRCUIT BREAKER TRIPPED — %d consecutive losses — paused until %s UTC",
 				consec, until.Format("2006-01-02 15:04"))
 			n.CircuitBreaker(consec, until)
 		}
 		return true
 	}
 
-	// 3. Daily loss limit
+	// 3. Daily loss limit.
 	dailyPnL, err := database.GetTodayPnL()
 	if err != nil {
 		log.Printf("[safety] daily P&L check error: %v", err)
 	} else if dailyPnL < -cfg.MaxDailyLoss {
-		log.Printf("[safety] 🚨 DAILY LOSS LIMIT HIT — today P&L: $%.2f (limit: -$%.2f) — no more trades today",
+		log.Printf("[safety] 🚨 DAILY LOSS LIMIT HIT — today P&L: $%.2f (limit: -$%.2f)",
 			dailyPnL, cfg.MaxDailyLoss)
 		n.DailyLossLimit(dailyPnL, cfg.MaxDailyLoss)
 		return true
@@ -183,8 +303,8 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll float64, n *n
 	return false
 }
 
-// resolveOpenTrades checks every open paper trade against the CLOB API and
-// writes WIN/LOSS + P&L to the DB when the market has settled.
+// ── Resolve open trades ───────────────────────────────────────────────────────
+
 func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Scanner, n *notify.Notifier) {
 	trades, err := database.GetOpenPaperTrades()
 	if err != nil {
@@ -210,21 +330,16 @@ func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Sca
 			log.Printf("[resolve] skip %s: %v", t.ConditionID[:12], err)
 			continue
 		}
-
-		// Market must be closed/inactive before we resolve it
 		if m.Active && !m.Closed {
 			continue
 		}
 
-		// Find the token the bot bet on and determine outcome
-		found := false
-		won := false
+		found, won := false, false
 		for _, tok := range m.Tokens {
 			if tok.Outcome != t.Side {
 				continue
 			}
 			found = true
-			// Winner flag is set on resolution; price reaching 1.0 is a safe fallback
 			won = tok.Winner || tok.Price >= 0.999
 			break
 		}
@@ -259,108 +374,4 @@ func resolveOpenTrades(ctx context.Context, database *db.DB, scanner *market.Sca
 	if resolved > 0 {
 		log.Printf("[resolve] %d trade(s) settled", resolved)
 	}
-}
-
-// runScan is one full scan-size-execute cycle.
-func runScan(
-	ctx context.Context,
-	cfg *config.Config,
-	database *db.DB,
-	scanner *market.Scanner,
-	exec executor.Executor,
-	n *notify.Notifier,
-) {
-	log.Println("── scan start ──")
-
-	// 0. Resolve any open paper trades first
-	resolveOpenTrades(ctx, database, scanner, n)
-
-	// 1. Load current bankroll from settings
-	bankroll, err := database.GetBankroll()
-	if err != nil {
-		log.Printf("[scan] bankroll read error: %v — using fallback", err)
-		bankroll = 0
-	}
-	if bankroll <= 0 {
-		log.Printf("[scan] bankroll not set in DB, using fallback $%.0f", cfg.FallbackSize)
-		bankroll = cfg.FallbackSize * 3 // rough estimate if not configured
-	}
-
-	// 2. Compute Kelly sizing from trade history
-	stats, err := database.GetTradeStats()
-	if err != nil {
-		log.Printf("[scan] trade stats error: %v", err)
-		stats = &db.TradeStats{}
-	}
-
-	kellyResult := kelly.Compute(
-		stats.Wins, stats.Losses,
-		stats.AvgWin, stats.AvgLoss,
-		bankroll, cfg.MaxPositionSize, cfg.FallbackSize,
-	)
-
-	if kellyResult.Computed {
-		log.Printf("[kelly] full=%.1f%%  half=%.1f%%  size=$%.2f  (bankroll=$%.0f)",
-			kellyResult.FullKelly*100, kellyResult.HalfKelly*100,
-			kellyResult.PositionSize, bankroll)
-	} else {
-		log.Printf("[kelly] insufficient loss data — fallback size=$%.2f", kellyResult.PositionSize)
-	}
-
-	// Safety nets — halt trading if any circuit breaker is active.
-	// Open trade resolution above always runs; only new entries are blocked.
-	if checkSafetyNets(cfg, database, bankroll, n) {
-		log.Println("── scan end (halted by safety net) ──")
-		return
-	}
-
-	// Sizer function: Kelly result is constant per scan regardless of price.
-	// (Price only affects shares count, not dollar size.)
-	sizer := func(_ float64) float64 { return kellyResult.PositionSize }
-
-	// 3. Build deduplication sets
-	traded, err := database.ActiveConditionIDs()
-	if err != nil {
-		log.Printf("[scan] active positions error: %v", err)
-		traded = map[string]bool{}
-	}
-	// Also check trades table to avoid re-entering paper trades
-	// (ActiveConditionIDs only covers the positions table)
-
-	// 4. Find qualifying opportunities
-	opps, err := scanner.Scan(traded, traded, sizer)
-	if err != nil {
-		log.Printf("[scan] scanner error: %v", err)
-		return
-	}
-
-	if len(opps) == 0 {
-		log.Println("[scan] no qualifying opportunities")
-		log.Println("── scan end ──")
-		return
-	}
-
-	log.Printf("[scan] %d opportunit(ies) found", len(opps))
-
-	// 5. Execute each opportunity
-	for _, opp := range opps {
-		// Final dedup check against trades table (catches paper trades too)
-		already, err := database.IsAlreadyTraded(opp.ConditionID)
-		if err != nil {
-			log.Printf("[scan] dedup check error for %s: %v", opp.ConditionID[:12], err)
-			continue
-		}
-		if already {
-			log.Printf("[scan] skip %s — already in trades table", opp.ConditionID[:12])
-			continue
-		}
-
-		if err := exec.PlaceOrder(ctx, opp); err != nil {
-			log.Printf("[scan] order failed for %s: %v", opp.ConditionID[:12], err)
-			continue
-		}
-		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Price, opp.SizeUSDC)
-	}
-
-	log.Println("── scan end ──")
 }

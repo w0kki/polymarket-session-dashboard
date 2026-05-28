@@ -113,6 +113,96 @@ func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursT
 	}
 }
 
+// WatchlistEntry is a market that passed all non-price filters and is being
+// actively monitored for a qualifying price. Built by BuildWatchlist (slow
+// loop) and polled by PollOpportunity (fast loop).
+type WatchlistEntry struct {
+	ConditionID string
+	Market      string // human-readable title
+	Slug        string
+	Sport       string
+	Icon        string
+}
+
+// BuildWatchlist does a full market scan and returns every market that passes
+// all structural filters (sport, moneyline, doubles, hours) but WITHOUT price
+// filtering. Called infrequently (~every 10 min) to refresh the watchlist.
+func (s *Scanner) BuildWatchlist(alreadyTraded, activePositions map[string]bool) ([]WatchlistEntry, error) {
+	markets, err := s.fetchMarkets()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[scanner] discovery: fetched %d markets", len(markets))
+
+	var entries []WatchlistEntry
+	for _, m := range markets {
+		if !s.qualifies(m, alreadyTraded, activePositions) {
+			continue
+		}
+		sport := DetectSport(m.MarketSlug)
+		entries = append(entries, WatchlistEntry{
+			ConditionID: m.ConditionID,
+			Market:      m.Question,
+			Slug:        m.MarketSlug,
+			Sport:       sport,
+			Icon:        m.Icon,
+		})
+	}
+	return entries, nil
+}
+
+// PollOpportunity fetches a single market by condition ID and returns an
+// Opportunity if the current price falls within the sport-specific bounds.
+// Returns nil (no error) when the price doesn't qualify or the market is closed.
+func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) float64) (*Opportunity, error) {
+	m, err := s.CheckMarket(entry.ConditionID)
+	if err != nil {
+		return nil, err
+	}
+	if !m.Active || m.Closed || !m.AcceptingOrders {
+		return nil, nil // market has expired or closed since last discovery
+	}
+
+	side, price := bestOutcome(*m)
+	if side == "" {
+		return nil, nil
+	}
+
+	// Apply per-sport price bounds (same logic as Scan)
+	minPrice := s.threshold
+	maxPrice := s.maxPrice
+	if bounds, ok := s.sportBounds[entry.Sport]; ok {
+		if bounds.MinPrice > 0 {
+			minPrice = bounds.MinPrice
+		}
+		if bounds.MaxPrice > 0 {
+			maxPrice = bounds.MaxPrice
+		}
+	}
+	if price < minPrice || (maxPrice > 0 && price > maxPrice) {
+		return nil, nil
+	}
+
+	rawSize := sizer(price)
+	if rawSize <= 0 {
+		return nil, nil
+	}
+	size := min64(rawSize, s.maxSize)
+	shares := size / price
+
+	return &Opportunity{
+		ConditionID: m.ConditionID,
+		Market:      m.Question,
+		Slug:        m.MarketSlug,
+		Sport:       entry.Sport,
+		Side:        side,
+		Price:       price,
+		Shares:      shares,
+		SizeUSDC:    size,
+		Icon:        m.Icon,
+	}, nil
+}
+
 // Scan fetches active markets and returns those that pass all filters.
 //
 //	alreadyTraded   – conditionIds already in the trades table (skip)
