@@ -41,6 +41,7 @@ export interface TradeRow {
   status: 'WIN' | 'LOSS' | 'ACTIVE' | 'SOLD';
   timestamp: number;
   icon: string;
+  slug?: string;
 }
 
 export interface TradeLogRow {
@@ -64,6 +65,9 @@ export interface TradeLogRow {
   totalFees: number;     // R  = P + Q
   netPnl: number | null; // S  = L - R
   icon: string;
+  slug?: string;
+  conditionId?: string;
+  currentPrice?: number;
 }
 
 export interface SessionStats {

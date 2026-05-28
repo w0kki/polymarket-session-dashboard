@@ -110,9 +110,14 @@ function buildTradeRows(positions, activity) {
     let pnl     = null;
 
     if (redeemedMap[cid] !== undefined) {
-      exit    = 1.00;
-      outcome = 'WIN';
-      pnl     = redeemedMap[cid] - cost;
+      const payout = redeemedMap[cid];
+      pnl     = payout - cost;
+      // Compute true per-share exit price rather than hardcoding 1.0 for all
+      // redemptions — a losing ticket that settled at ~10¢ still gets a REDEEM
+      // activity for the small residual payout, which caused the old code to
+      // mark it WIN and store exit_price = 1.0.
+      exit    = shares > 0 ? payout / shares : (payout > 0 ? 1.0 : 0.0);
+      outcome = pnl >= 0 ? 'WIN' : 'LOSS';
     } else if (posMap[cid]) {
       const pos = posMap[cid];
       if (pos.curPrice >= 0.998) {
@@ -130,6 +135,13 @@ function buildTradeRows(positions, activity) {
       exit    = sellAct?.price ?? null;
       pnl     = received - cost;
       outcome = pnl >= 0 ? 'WIN' : 'LOSS';
+    } else {
+      // Position is no longer in the wallet and there is no redemption or sale
+      // activity. This means the market resolved against us — losing tokens
+      // simply disappear without generating a REDEEM event.
+      exit    = 0.0;
+      outcome = 'LOSS';
+      pnl     = -cost;
     }
 
     const pnlPct    = pnl !== null && size > 0 ? pnl / size : null;

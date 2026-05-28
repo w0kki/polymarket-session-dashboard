@@ -111,6 +111,71 @@ func (d *DB) ActiveConditionIDs() (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// ── Safety net queries ───────────────────────────────────────────────────────
+
+// GetTodayPnL returns the sum of resolved P&L for trades entered today (UTC).
+func (d *DB) GetTodayPnL() (float64, error) {
+	var pnl float64
+	err := d.conn.QueryRow(`
+		SELECT COALESCE(SUM(pnl), 0)
+		FROM trades
+		WHERE date = date('now')
+		  AND outcome IN ('WIN', 'LOSS')
+		  AND pnl IS NOT NULL
+	`).Scan(&pnl)
+	return pnl, err
+}
+
+// GetConsecutiveLosses returns the number of consecutive LOSS outcomes
+// at the tail of the paper trade history (ordered by updated_at desc).
+// Only paper trades are considered — real trade outcomes should not
+// trigger the paper-bot circuit breaker.
+func (d *DB) GetConsecutiveLosses() (int, error) {
+	rows, err := d.conn.Query(`
+		SELECT outcome FROM trades
+		WHERE outcome IN ('WIN', 'LOSS') AND trade_type = 'Paper'
+		ORDER BY updated_at DESC
+		LIMIT 20
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("get consecutive losses: %w", err)
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var outcome string
+		if err := rows.Scan(&outcome); err != nil {
+			return 0, err
+		}
+		if outcome != "LOSS" {
+			break
+		}
+		count++
+	}
+	return count, rows.Err()
+}
+
+// GetSetting reads an arbitrary value from the settings table.
+// Returns "" with no error when the key does not exist.
+func (d *DB) GetSetting(key string) (string, error) {
+	var val string
+	err := d.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return val, err
+}
+
+// SetSetting upserts a key-value pair in the settings table.
+func (d *DB) SetSetting(key, value string) error {
+	_, err := d.conn.Exec(`
+		INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, key, value)
+	return err
+}
+
 // ── Paper trade writes ───────────────────────────────────────────────────────
 
 // PaperTrade is what the bot inserts when DRY_RUN=true.
@@ -125,6 +190,54 @@ type PaperTrade struct {
 	Shares      float64
 	SizeUSDC    float64
 	BuyFee      float64
+}
+
+// OpenPaperTrade is a paper trade that has not yet been resolved.
+type OpenPaperTrade struct {
+	ConditionID string
+	Side        string  // outcome label the bot bet on
+	Shares      float64
+	SizeUSDC    float64 // amount paid (cost basis)
+	BuyFee      float64
+}
+
+// GetOpenPaperTrades returns all paper trades still awaiting resolution.
+func (d *DB) GetOpenPaperTrades() ([]OpenPaperTrade, error) {
+	rows, err := d.conn.Query(`
+		SELECT condition_id, side, shares, size_usdc, COALESCE(buy_fee, 0)
+		FROM trades
+		WHERE trade_type = 'Paper' AND outcome = 'NA'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get open paper trades: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OpenPaperTrade
+	for rows.Next() {
+		var t OpenPaperTrade
+		if err := rows.Scan(&t.ConditionID, &t.Side, &t.Shares, &t.SizeUSDC, &t.BuyFee); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ResolvePaperTrade writes the final outcome, exit price, and P&L for a paper trade.
+// sell_fee is 0 for redemptions; net_pnl = pnl − buy_fee (already stored).
+func (d *DB) ResolvePaperTrade(conditionID, outcome string, exitPrice, pnl, pnlPct float64) error {
+	_, err := d.conn.Exec(`
+		UPDATE trades SET
+			outcome    = ?,
+			exit_price = ?,
+			pnl        = ?,
+			pnl_pct    = ?,
+			net_pnl    = ? - COALESCE(buy_fee, 0),
+			updated_at = datetime('now')
+		WHERE condition_id = ? AND trade_type = 'Paper' AND outcome = 'NA'
+	`, outcome, exitPrice, pnl, pnlPct, pnl, conditionID)
+	return err
 }
 
 // InsertPaperTrade writes a paper trade to the shared trades table.

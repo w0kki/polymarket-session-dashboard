@@ -4,8 +4,74 @@ import { fetchPositions, fetchActivity, computeStats, buildTradeRows, buildTrade
 
 const REFRESH_INTERVAL = 60 * 60 * 1000;
 
-const fmt$ = (n: number, decimals = 2) =>
-  (n >= 0 ? '+' : '') + n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+async function fetchPaperTrades(): Promise<TradeLogRow[]> {
+  try {
+    const res = await fetch('/api/trades?limit=500');
+    if (!res.ok) return [];
+    const rows: any[] = await res.json();
+    return rows
+      .filter(r => r.trade_type === 'Paper')
+      .map(r => ({
+        num: 0,
+        date: r.date,
+        market: r.market,
+        sport: r.sport,
+        type: r.trade_type,
+        side: r.side,
+        entry: r.entry_price,
+        shares: r.shares,
+        size: r.size_usdc,
+        exit: r.exit_price ?? null,
+        outcome: r.outcome,
+        pnl: r.pnl ?? null,
+        pnlPct: r.pnl_pct ?? null,
+        notes: '',
+        feeCat: r.fee_cat ?? '',
+        buyFee: r.buy_fee ?? 0,
+        sellFee: r.sell_fee ?? 0,
+        totalFees: r.total_fees ?? 0,
+        netPnl: r.net_pnl ?? null,
+        icon: r.icon ?? '',
+        slug: r.slug ?? '',
+        conditionId: r.condition_id ?? '',
+      }));
+  } catch {
+    return [];
+  }
+}
+
+// Fetch live token prices for open paper positions via the CLOB proxy.
+// Returns a map of `${conditionId}:${outcome}` → current price.
+async function fetchLivePrices(trades: TradeLogRow[]): Promise<Record<string, number>> {
+  const open = trades.filter(t => t.outcome === 'NA' && t.conditionId);
+  if (open.length === 0) return {};
+
+  const results = await Promise.all(
+    open.map(async (t) => {
+      try {
+        const res = await fetch(`/api/clob/markets/${t.conditionId}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const token = (data.tokens ?? []).find((tk: any) => tk.outcome === t.side);
+        if (!token) return null;
+        return { key: `${t.conditionId}:${t.side}`, price: token.price as number };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const priceMap: Record<string, number> = {};
+  for (const r of results) {
+    if (r !== null) priceMap[r.key] = r.price;
+  }
+  return priceMap;
+}
+
+const fmt$ = (n: number, decimals = 2) => {
+  const abs = Math.abs(n).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  return (n >= 0 ? '+' : '-') + abs;
+};
 const fmt$abs = (n: number) =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 const fmtPct = (n: number) => (n * 100).toFixed(1) + '%';
@@ -249,7 +315,16 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
                     {row.icon && (
                       <img src={row.icon} alt="" className="w-4 h-4 rounded-full object-cover shrink-0" />
                     )}
-                    <span className="text-gray-200 line-clamp-1 max-w-48">{row.market}</span>
+                    {row.slug ? (
+                      <a
+                        href={`https://polymarket.com/event/${row.slug}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-gray-200 line-clamp-1 max-w-48 hover:text-blue-400 hover:underline transition-colors"
+                      >{row.market}</a>
+                    ) : (
+                      <span className="text-gray-200 line-clamp-1 max-w-48">{row.market}</span>
+                    )}
                   </div>
                 </td>
                 <td className="px-3 py-2.5 text-gray-400">{row.sport}</td>
@@ -339,6 +414,199 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
   );
 }
 
+function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
+  const resolved  = paperTrades.filter(r => r.outcome === 'WIN' || r.outcome === 'LOSS');
+  const open      = paperTrades.filter(r => r.outcome === 'NA');
+  const wins      = resolved.filter(r => r.outcome === 'WIN').length;
+  const losses    = resolved.filter(r => r.outcome === 'LOSS').length;
+  const winRate   = resolved.length > 0 ? wins / resolved.length : 0;
+  const totalPnl  = resolved.reduce((s, r) => s + (r.pnl ?? 0), 0);
+  const totalFees = paperTrades.reduce((s, r) => s + r.totalFees, 0);
+  const netPnl    = totalPnl - totalFees;
+  const portfolioValue = open.reduce((s, r) => s + r.size, 0);
+  const largestWin  = resolved.filter(r => r.outcome === 'WIN').reduce((m, r) => Math.max(m, r.pnl ?? 0), 0);
+  const largestLoss = resolved.filter(r => r.outcome === 'LOSS').reduce((m, r) => Math.min(m, r.pnl ?? 0), 0);
+  const avgReturn   = resolved.length > 0 ? totalPnl / resolved.length : 0;
+  const avgFee      = paperTrades.length > 0 ? totalFees / paperTrades.length : 0;
+
+  let cumulative = 0;
+  const runningRows: TradeRow[] = resolved.map((r, i) => {
+    cumulative += r.pnl ?? 0;
+    return {
+      index: i + 1,
+      title: r.market,
+      outcome: r.side,
+      size: r.shares,
+      price: r.entry,
+      cost: r.size,
+      pnl: r.pnl ?? 0,
+      cumulative,
+      status: r.outcome === 'WIN' ? 'WIN' : 'LOSS',
+      timestamp: 0,
+      icon: r.icon,
+      slug: r.slug ?? '',
+    };
+  });
+
+  return (
+    <>
+      {/* KPI Row 1 */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 animate-fade-in">
+        <KpiCard label="Paper Trades"    value={String(paperTrades.length)} />
+        <KpiCard label="Win Rate"        value={resolved.length > 0 ? fmtPct(winRate) : '—'} color="green" />
+        <KpiCard label="Portfolio Value" value={fmt$abs(portfolioValue)} sub="open positions" />
+        <KpiCard
+          label="Total P&L"
+          value={resolved.length > 0 ? fmt$(totalPnl) : '—'}
+          sub={`${fmt$(totalPnl, 2)} realized`}
+          color={totalPnl >= 0 ? 'green' : 'red'}
+        />
+        <KpiCard label="Largest Win"  value={largestWin  > 0 ? fmt$(largestWin)  : '—'} color="green" />
+        <KpiCard label="Largest Loss" value={largestLoss < 0 ? fmt$(largestLoss) : '—'} color={largestLoss < 0 ? 'red' : 'default'} />
+      </div>
+
+      {/* KPI Row 2 */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 animate-fade-in">
+        <KpiCard label="Wins"               value={String(wins)}   color="green" />
+        <KpiCard label="Losses"             value={String(losses)} color={losses > 0 ? 'red' : 'default'} />
+        <KpiCard label="Total Fees"         value={fmt$abs(totalFees)} sub={`${fmt$abs(avgFee)} avg/trade`} />
+        <KpiCard label="Net P&L (after fees)" value={resolved.length > 0 ? fmt$(netPnl) : '—'} color={netPnl >= 0 ? 'green' : 'red'} />
+        <KpiCard label="Avg Return/Trade"   value={resolved.length > 0 ? fmt$(avgReturn) : '—'} color={avgReturn >= 0 ? 'green' : 'red'} />
+      </div>
+
+      {/* Open Paper Positions */}
+      <section className="animate-fade-in">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
+          Open Paper Positions ({open.length})
+        </h2>
+        <div className="rounded-xl border border-gray-800 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-3">Market</th>
+                <th className="text-left px-4 py-3">Outcome</th>
+                <th className="text-right px-4 py-3">Shares</th>
+                <th className="text-right px-4 py-3">Avg</th>
+                <th className="text-right px-4 py-3">Current</th>
+                <th className="text-right px-4 py-3">Value</th>
+                <th className="text-right px-4 py-3">P&amp;L</th>
+                <th className="text-right px-4 py-3">P&amp;L%</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/50">
+              {open.length === 0 ? (
+                <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-600 text-xs">No open paper positions</td></tr>
+              ) : open.map((r, i) => (
+                <tr key={i} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      {r.icon && <img src={r.icon} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />}
+                      {r.slug ? (
+                        <a href={`https://polymarket.com/event/${r.slug}`} target="_blank" rel="noopener noreferrer"
+                          className="text-gray-200 leading-tight line-clamp-1 hover:text-blue-400 hover:underline transition-colors"
+                        >{r.market}</a>
+                      ) : (
+                        <span className="text-gray-200 leading-tight line-clamp-1">{r.market}</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-blue-300">{r.side}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-300">{r.shares.toFixed(1)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmtCents(r.entry)}</td>
+                  <td className={`px-4 py-3 text-right tabular-nums font-medium ${r.currentPrice !== undefined ? 'text-gray-300' : 'text-gray-600'}`}>
+                    {r.currentPrice !== undefined ? fmtCents(r.currentPrice) : '—'}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-200">
+                    {r.currentPrice !== undefined ? fmt$abs(r.shares * r.currentPrice) : '—'}
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums font-medium ${r.pnl === null ? 'text-gray-600' : r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    <span className="whitespace-nowrap">{r.pnl === null ? '—' : fmt$(r.pnl)}</span>
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums ${r.pnlPct === null ? 'text-gray-600' : r.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {r.pnlPct === null ? '—' : fmtPct(r.pnlPct)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Running P&L */}
+      <section className="animate-fade-in">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
+          Running P&L by Trade
+        </h2>
+        <div className="rounded-xl border border-gray-800 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-3 w-10">#</th>
+                <th className="text-left px-4 py-3 max-w-[11rem]">Market</th>
+                <th className="text-left px-4 py-3">Outcome</th>
+                <th className="text-right px-4 py-3">Shares</th>
+                <th className="text-right px-4 py-3">Entry</th>
+                <th className="text-right px-4 py-3">Cost</th>
+                <th className="text-right px-4 py-3 w-32">P&amp;L</th>
+                <th className="text-right px-4 py-3">Cumulative</th>
+                <th className="text-center px-4 py-3">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/50">
+              {runningRows.length === 0 ? (
+                <tr><td colSpan={9} className="px-4 py-6 text-center text-gray-600 text-xs">No resolved paper trades yet</td></tr>
+              ) : runningRows.map(row => (
+                <tr key={row.index} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
+                  <td className="px-4 py-3 text-gray-600 tabular-nums">{row.index}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      {row.icon && <img src={row.icon} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />}
+                      {row.slug ? (
+                        <a href={`https://polymarket.com/event/${row.slug}`} target="_blank" rel="noopener noreferrer"
+                          className="text-gray-200 line-clamp-1 hover:text-blue-400 hover:underline transition-colors"
+                        >{row.title}</a>
+                      ) : (
+                        <span className="text-gray-200 line-clamp-1">{row.title}</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-blue-300 text-xs">{row.outcome}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-300">{row.size.toFixed(1)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmtCents(row.price)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmt$abs(row.cost)}</td>
+                  <td className={`px-4 py-3 text-right tabular-nums font-medium ${row.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    <span className="whitespace-nowrap">{fmt$(row.pnl)}</span>
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums font-semibold ${row.cumulative >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmt$(row.cumulative)}
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    <StatusBadge status={row.status} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            {runningRows.length > 0 && (
+              <tfoot>
+                <tr className="bg-gray-900 border-t border-gray-700">
+                  <td colSpan={6} className="px-4 py-3 text-xs text-gray-500 uppercase tracking-wider">Totals</td>
+                  <td className={`px-4 py-3 text-right tabular-nums font-bold ${cumulative >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmt$(cumulative)}
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums font-bold ${cumulative >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmt$(cumulative)}
+                  </td>
+                  <td />
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
+
 function DashboardView({ positions, tradeRows, stats }: { positions: Position[]; tradeRows: TradeRow[]; stats: SessionStats }) {
   return (
     <>
@@ -399,7 +667,16 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
                         {p.icon && (
                           <img src={p.icon} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
                         )}
-                        <span className="text-gray-200 leading-tight line-clamp-1">{p.title}</span>
+                        {p.slug ? (
+                          <a
+                            href={`https://polymarket.com/event/${p.slug}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-gray-200 leading-tight line-clamp-1 hover:text-blue-400 hover:underline transition-colors"
+                          >{p.title}</a>
+                        ) : (
+                          <span className="text-gray-200 leading-tight line-clamp-1">{p.title}</span>
+                        )}
                         {isResolved && (
                           <span className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full shrink-0">
                             Resolved ✓
@@ -438,12 +715,12 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
             <thead>
               <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
                 <th className="text-left px-4 py-3 w-10">#</th>
-                <th className="text-left px-4 py-3">Market</th>
+                <th className="text-left px-4 py-3 max-w-[11rem]">Market</th>
                 <th className="text-left px-4 py-3">Outcome</th>
                 <th className="text-right px-4 py-3">Shares</th>
                 <th className="text-right px-4 py-3">Entry</th>
                 <th className="text-right px-4 py-3">Cost</th>
-                <th className="text-right px-4 py-3">P&L</th>
+                <th className="text-right px-4 py-3 w-32">P&L</th>
                 <th className="text-right px-4 py-3">Cumulative</th>
                 <th className="text-center px-4 py-3">Status</th>
               </tr>
@@ -457,7 +734,16 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
                       {row.icon && (
                         <img src={row.icon} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
                       )}
-                      <span className="text-gray-200 line-clamp-1">{row.title}</span>
+                      {row.slug ? (
+                        <a
+                          href={`https://polymarket.com/event/${row.slug}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-gray-200 line-clamp-1 hover:text-blue-400 hover:underline transition-colors"
+                        >{row.title}</a>
+                      ) : (
+                        <span className="text-gray-200 line-clamp-1">{row.title}</span>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-blue-300 text-xs">{row.outcome}</td>
@@ -465,7 +751,7 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
                   <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmtCents(row.price)}</td>
                   <td className="px-4 py-3 text-right tabular-nums text-gray-400">{fmt$abs(row.cost)}</td>
                   <td className={`px-4 py-3 text-right tabular-nums font-medium ${row.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmt$(row.pnl)}
+                    <span className="whitespace-nowrap">{fmt$(row.pnl)}</span>
                   </td>
                   <td className={`px-4 py-3 text-right tabular-nums font-semibold ${row.cumulative >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {fmt$(row.cumulative)}
@@ -500,7 +786,8 @@ export default function App() {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [tradeRows, setTradeRows] = useState<TradeRow[]>([]);
   const [tradeLog, setTradeLog] = useState<TradeLogRow[]>([]);
-  const [view, setView] = useState<'dashboard' | 'tradelog' | 'kelly'>('dashboard');
+  const [paperTrades, setPaperTrades] = useState<TradeLogRow[]>([]);
+  const [view, setView] = useState<'dashboard' | 'paper' | 'tradelog' | 'kelly'>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -509,16 +796,30 @@ export default function App() {
   const load = useCallback(async () => {
     try {
       setError(null);
-      const [pos, act] = await Promise.all([fetchPositions(), fetchActivity()]);
+      const [pos, act, rawPaper] = await Promise.all([fetchPositions(), fetchActivity(), fetchPaperTrades()]);
       const rows = buildTradeRows(pos, act);
       const rawStats = computeStats(pos, act);
-      // Use buildTradeRows as the single source of truth for P&L totals so that
-      // the KPI cards, Running P&L footer, and Trade Log footer all agree.
       const buildPnl = rows.at(-1)?.cumulative ?? 0;
       setPositions(pos);
       setStats({ ...rawStats, totalPnl: buildPnl, netPnl: buildPnl - rawStats.totalFees });
       setTradeRows(rows);
-      setTradeLog(buildTradeLogRows(pos, act));
+      const realLog = buildTradeLogRows(pos, act);
+      const merged = [...realLog, ...rawPaper]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((row, i) => ({ ...row, num: i + 1 }));
+      setTradeLog(merged);
+      // Fetch live prices for open paper positions and merge in
+      const priceMap = await fetchLivePrices(rawPaper);
+      const paperWithPrices = rawPaper.map(t => {
+        if (t.outcome !== 'NA' || !t.conditionId) return t;
+        const currentPrice = priceMap[`${t.conditionId}:${t.side}`];
+        if (currentPrice === undefined) return t;
+        const currentValue = t.shares * currentPrice;
+        const pnl         = currentValue - t.size;
+        const pnlPct      = t.size > 0 ? pnl / t.size : null;
+        return { ...t, currentPrice, pnl, pnlPct };
+      });
+      setPaperTrades(paperWithPrices);
       setLastUpdated(new Date());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load data');
@@ -550,6 +851,16 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setView(v => v === 'paper' ? 'dashboard' : 'paper')}
+              className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                view === 'paper'
+                  ? 'bg-cyan-600 border-cyan-500 text-white'
+                  : 'bg-gray-800/50 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`}
+            >
+              Paper Trades
+            </button>
             <button
               onClick={() => setView(v => v === 'tradelog' ? 'dashboard' : 'tradelog')}
               className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
@@ -606,7 +917,9 @@ export default function App() {
             </button>
           </div>
         ) : stats ? (
-          view === 'tradelog'
+          view === 'paper'
+            ? <PaperDashboardView paperTrades={paperTrades} />
+            : view === 'tradelog'
             ? <TradeLogView tradeLog={tradeLog} />
             : view === 'kelly'
             ? <KellyView stats={stats} tradeLog={tradeLog} />

@@ -222,6 +222,7 @@ export function buildTradeLogRows(positions: Position[], activity: Activity[]): 
       totalFees,
       netPnl,
       icon: b.icon,
+      slug: b.slug,
     });
   }
 
@@ -289,6 +290,7 @@ export function buildTradeRows(positions: Position[], activity: Activity[]): Tra
       status,
       timestamp: b.timestamp,
       icon: b.icon,
+      slug: b.slug,
     });
   }
 

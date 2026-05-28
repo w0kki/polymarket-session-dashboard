@@ -2,3 +2,18 @@ node_modules
 dist
 .DS_Store
 *.local
+
+# Database — never commit trade data
+trades.db
+trades.db-shm
+trades.db-wal
+
+# Compiled bot binaries
+bot/bot
+bot/bot-pi
+bot/bot_bin
+bot/polymarket-bot-linux-*
+
+# Secrets / env
+.env
+*.env

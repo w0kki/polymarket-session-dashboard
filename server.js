@@ -98,6 +98,22 @@ app.post('/api/sync/trigger', async (_req, res) => {
   }
 });
 
+// ─── Polymarket CLOB proxy ────────────────────────────────────────────────────
+
+app.use('/api/clob', async (req, res) => {
+  const qs  = Object.keys(req.query).length
+    ? '?' + new URLSearchParams(req.query).toString()
+    : '';
+  const url = `https://clob.polymarket.com${req.path}${qs}`;
+  try {
+    const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch {
+    res.status(502).json({ error: 'Proxy error' });
+  }
+});
+
 // ─── Polymarket data proxy ────────────────────────────────────────────────────
 
 app.use('/api/data', async (req, res) => {

@@ -5,9 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// moneylineSlug matches slugs that end in a bare date: sport-p1-p2-YYYY-MM-DD
+// Props and O/U markets have extra suffixes (-match-total-21pt5, etc.).
+var moneylineSlug = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}$`)
 
 // ── Sport detection ───────────────────────────────────────────────────────────
 
@@ -31,22 +36,31 @@ func DetectSport(slug string) string {
 	return slugSports[prefix]
 }
 
-// ── Gamma API types ───────────────────────────────────────────────────────────
-// Field names verified against gamma-api.polymarket.com.
-// outcomePrices and outcomes arrive as JSON-encoded strings, e.g.
-//   outcomePrices: "[\"0.95\",\"0.05\"]"
-//   outcomes:      "[\"Yes\",\"No\"]"
+// ── CLOB API types ────────────────────────────────────────────────────────────
 
-type gammaMarket struct {
-	ConditionID   string `json:"conditionId"`
-	Question      string `json:"question"`
-	Slug          string `json:"slug"`
-	Active        bool   `json:"active"`
-	Closed        bool   `json:"closed"`
-	EndDateISO    string `json:"endDateIso"`
-	OutcomePrices string `json:"outcomePrices"` // JSON string → []string
-	Outcomes      string `json:"outcomes"`       // JSON string → []string
-	Icon          string `json:"icon"`
+type clobToken struct {
+	TokenID string  `json:"token_id"`
+	Outcome string  `json:"outcome"`
+	Price   float64 `json:"price"`
+	Winner  bool    `json:"winner"`
+}
+
+type clobMarket struct {
+	ConditionID     string      `json:"condition_id"`
+	Question        string      `json:"question"`
+	MarketSlug      string      `json:"market_slug"`
+	Active          bool        `json:"active"`
+	Closed          bool        `json:"closed"`
+	AcceptingOrders bool        `json:"accepting_orders"`
+	EndDateISO      string      `json:"end_date_iso"`
+	Tokens          []clobToken `json:"tokens"`
+	Icon            string      `json:"icon"`
+}
+
+type clobResponse struct {
+	Data       []clobMarket `json:"data"`
+	NextCursor string       `json:"next_cursor"`
+	Count      int          `json:"count"`
 }
 
 // Opportunity represents a market that passed all filters and is ready
@@ -67,27 +81,31 @@ type Opportunity struct {
 
 type Scanner struct {
 	threshold       float64
+	maxPrice        float64
 	sports          []string
 	maxSize         float64
 	minHoursToClose float64
+	maxHoursToClose float64
 	client          *http.Client
 }
 
-func NewScanner(threshold float64, sports []string, maxSize, minHoursToClose float64) *Scanner {
+func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose float64) *Scanner {
 	return &Scanner{
 		threshold:       threshold,
+		maxPrice:        maxPrice,
 		sports:          sports,
 		maxSize:         maxSize,
 		minHoursToClose: minHoursToClose,
+		maxHoursToClose: maxHoursToClose,
 		client:          &http.Client{Timeout: 20 * time.Second},
 	}
 }
 
 // Scan fetches active markets and returns those that pass all filters.
 //
-//   alreadyTraded  – conditionIds already in the trades table (skip)
-//   activePositions – conditionIds currently held in the wallet (skip)
-//   sizer          – function that returns the desired $ size for a price
+//	alreadyTraded   – conditionIds already in the trades table (skip)
+//	activePositions – conditionIds currently held in the wallet (skip)
+//	sizer           – function that returns the desired $ size for a price
 func (s *Scanner) Scan(
 	alreadyTraded map[string]bool,
 	activePositions map[string]bool,
@@ -97,20 +115,22 @@ func (s *Scanner) Scan(
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[scanner] fetched %d active markets from Gamma API", len(markets))
+	log.Printf("[scanner] fetched %d markets from CLOB API", len(markets))
 
 	var opps []Opportunity
 	for _, m := range markets {
 		if !s.qualifies(m, alreadyTraded, activePositions) {
 			continue
 		}
-		sport := DetectSport(m.Slug)
-		side, price, err := bestOutcome(m)
-		if err != nil {
-			log.Printf("[scanner] skip %s: %v", m.ConditionID[:12], err)
+		sport := DetectSport(m.MarketSlug)
+		side, price := bestOutcome(m)
+		if side == "" {
 			continue
 		}
 		if price < s.threshold {
+			continue
+		}
+		if s.maxPrice > 0 && price > s.maxPrice {
 			continue
 		}
 
@@ -124,7 +144,7 @@ func (s *Scanner) Scan(
 		opps = append(opps, Opportunity{
 			ConditionID: m.ConditionID,
 			Market:      m.Question,
-			Slug:        m.Slug,
+			Slug:        m.MarketSlug,
 			Sport:       sport,
 			Side:        side,
 			Price:       price,
@@ -137,23 +157,65 @@ func (s *Scanner) Scan(
 }
 
 // qualifies runs the pre-price checks on a market.
-func (s *Scanner) qualifies(m gammaMarket, traded, positions map[string]bool) bool {
-	if !m.Active || m.Closed {
+func (s *Scanner) qualifies(m clobMarket, traded, positions map[string]bool) bool {
+	if !m.Active || m.Closed || !m.AcceptingOrders {
 		return false
 	}
 	if traded[m.ConditionID] || positions[m.ConditionID] {
 		return false
 	}
-	sport := DetectSport(m.Slug)
+	sport := DetectSport(m.MarketSlug)
 	if !s.sportAllowed(sport) {
 		return false
 	}
-	// Check time to close if end date is present
-	if m.EndDateISO != "" {
-		t, err := time.Parse(time.RFC3339, m.EndDateISO)
-		if err == nil && time.Until(t) < time.Duration(s.minHoursToClose*float64(time.Hour)) {
+	// Only trade the moneyline (match-winner) market.
+	// Props, O/U, and set markets append suffixes after the date in the slug.
+	if !moneylineSlug.MatchString(m.MarketSlug) {
+		return false
+	}
+	// Exclude doubles matches — slug contains "doubles" prefix segment.
+	if strings.Contains(strings.ToLower(m.MarketSlug), "doubles") {
+		return false
+	}
+	// Must be a head-to-head game/match — filters novelty props and futures.
+	// "vs." (with period, common in CLOB) and "vs " both pass.
+	if !strings.Contains(strings.ToLower(m.Question), " vs") {
+		return false
+	}
+	// Skip doubles tennis markets — the per-share upside at 96–99¢ is too
+	// small to justify the upset risk in a two-player team format.
+	// Check both the question text AND the slug (slugs always contain "-doubles-")
+	// so neither variation can slip through.
+	if strings.Contains(strings.ToLower(m.Question), "(doubles)") ||
+		strings.Contains(strings.ToLower(m.MarketSlug), "-doubles-") {
+		return false
+	}
+	// Skip Hamburg European Open — ATP 500 clay event where top-50 players
+	// are tightly matched pre-Roland Garros; empirical loss rate is 31%,
+	// far above market-implied probability at the 94–96¢ range.
+	if strings.Contains(strings.ToLower(m.MarketSlug), "hamburg") {
+		return false
+	}
+	// End date is required — skip if missing or unparseable
+	if m.EndDateISO == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, m.EndDateISO)
+	if err != nil {
+		// Fall back to date-only format e.g. "2026-05-19".
+		// Add 24h so the full calendar day is valid regardless of Pi timezone.
+		t, err = time.Parse("2006-01-02", m.EndDateISO)
+		if err != nil {
 			return false
 		}
+		t = t.Add(24 * time.Hour)
+	}
+	hoursToClose := time.Until(t).Hours()
+	if hoursToClose < s.minHoursToClose {
+		return false
+	}
+	if s.maxHoursToClose > 0 && hoursToClose > s.maxHoursToClose {
+		return false
 	}
 	return true
 }
@@ -167,61 +229,80 @@ func (s *Scanner) sportAllowed(sport string) bool {
 	return false
 }
 
-// bestOutcome parses the outcomePrices/outcomes fields and returns the
-// highest-priced outcome label and its price.
-func bestOutcome(m gammaMarket) (string, float64, error) {
-	if m.OutcomePrices == "" || m.Outcomes == "" {
-		return "", 0, fmt.Errorf("missing price data")
-	}
-
-	var priceStrs []string
-	if err := json.Unmarshal([]byte(m.OutcomePrices), &priceStrs); err != nil {
-		return "", 0, fmt.Errorf("parse outcomePrices: %w", err)
-	}
-	var outcomes []string
-	if err := json.Unmarshal([]byte(m.Outcomes), &outcomes); err != nil {
-		return "", 0, fmt.Errorf("parse outcomes: %w", err)
-	}
-	if len(priceStrs) == 0 || len(priceStrs) != len(outcomes) {
-		return "", 0, fmt.Errorf("mismatched price/outcome arrays")
-	}
-
+// bestOutcome returns the highest-priced outcome label and its price from the
+// market's token list. Returns ("", 0) if no tokens are present.
+func bestOutcome(m clobMarket) (string, float64) {
 	bestLabel := ""
 	bestPrice := 0.0
-	for i, ps := range priceStrs {
-		var p float64
-		fmt.Sscanf(ps, "%f", &p)
-		if p > bestPrice {
-			bestPrice = p
-			if i < len(outcomes) {
-				bestLabel = outcomes[i]
-			}
+	for _, t := range m.Tokens {
+		if t.Price > bestPrice {
+			bestPrice = t.Price
+			bestLabel = t.Outcome
 		}
 	}
-	if bestLabel == "" {
-		return "", 0, fmt.Errorf("could not determine best outcome")
-	}
-	return bestLabel, bestPrice, nil
+	return bestLabel, bestPrice
 }
 
-// fetchMarkets retrieves all active, unclosed markets from the Gamma API.
-func (s *Scanner) fetchMarkets() ([]gammaMarket, error) {
-	url := "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=500"
+// fetchMarkets paginates through all markets from the CLOB API using
+// cursor-based pagination. Returns only active, non-closed markets.
+//
+// The CLOB API sorts oldest-first. Live 2026 markets are at offsets ~650k+,
+// so we skip the historical backlog by starting well into the pagination.
+// "NjUwMDAw" = base64("650000"); adjust upward as the market count grows.
+func (s *Scanner) fetchMarkets() ([]clobMarket, error) {
+	const maxPages = 200 // safety cap — plenty of room beyond the current ~84 pages remaining
+	var all []clobMarket
+	// CLOB API has ~1,184 pages total sorted oldest-first.
+	// May 2026 markets begin at page ~1,050; today's live matches at ~1,170.
+	// Start at offset 1,100,000 (page 1,100) to scan only the recent tail.
+	// "MTEwMDAwMA==" = base64("1100000")
+	cursor := "MTEwMDAwMA=="
+
+	for page := 0; page < maxPages; page++ {
+		url := fmt.Sprintf("https://clob.polymarket.com/markets?next_cursor=%s", cursor)
+		resp, err := s.client.Get(url)
+		if err != nil {
+			return nil, fmt.Errorf("CLOB API request (page=%d): %w", page, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("CLOB API returned %d (page=%d)", resp.StatusCode, page)
+		}
+
+		var page_resp clobResponse
+		if err := json.NewDecoder(resp.Body).Decode(&page_resp); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode CLOB response (page=%d): %w", page, err)
+		}
+		resp.Body.Close()
+
+		all = append(all, page_resp.Data...)
+
+		if page_resp.NextCursor == "" || page_resp.NextCursor == cursor || page_resp.Count < 1000 {
+			break
+		}
+		cursor = page_resp.NextCursor
+	}
+	return all, nil
+}
+
+// CheckMarket fetches a single market by condition ID from the CLOB API.
+// Used by the resolver to check if an open paper trade has settled.
+func (s *Scanner) CheckMarket(conditionID string) (*clobMarket, error) {
+	url := fmt.Sprintf("https://clob.polymarket.com/markets/%s", conditionID)
 	resp, err := s.client.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("gamma API request: %w", err)
+		return nil, fmt.Errorf("fetch market %s: %w", conditionID[:12], err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gamma API returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("market %s returned %d", conditionID[:12], resp.StatusCode)
 	}
-
-	var markets []gammaMarket
-	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
-		return nil, fmt.Errorf("decode gamma response: %w", err)
+	var m clobMarket
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return nil, fmt.Errorf("decode market %s: %w", conditionID[:12], err)
 	}
-	return markets, nil
+	return &m, nil
 }
 
 func min64(a, b float64) float64 {
