@@ -55,6 +55,11 @@ type Config struct {
 	// Hard cap on position size regardless of Kelly output ($30).
 	MaxPositionSize float64
 
+	// Minimum total market volume in USD before the bot will enter.
+	// Filters out thin/illiquid markets. 0 = disabled.
+	// MIN_VOLUME (default 50000)
+	MinVolume float64
+
 	// Sports the bot is allowed to trade. Comma-separated.
 	// e.g. "Baseball"  or  "Baseball,Soccer"
 	Sports []string
@@ -107,6 +112,7 @@ func Load() *Config {
 		HockeyMinPrice:   envFloat("HOCKEY_MIN_PRICE", 0.95),
 		HockeyMaxPrice:   envFloat("HOCKEY_MAX_PRICE", 0.97),
 		MaxPositionSize: envFloat("MAX_POSITION_SIZE", 30.0),
+		MinVolume:       envFloat("MIN_VOLUME", 50000.0),
 		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
 		MinHoursToClose: envFloat("MIN_HOURS_TO_CLOSE", 0.0),
 		MaxHoursToClose: envFloat("MAX_HOURS_TO_CLOSE", 0.0),

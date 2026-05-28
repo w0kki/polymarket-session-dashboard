@@ -93,11 +93,12 @@ type Scanner struct {
 	maxSize         float64
 	minHoursToClose float64
 	maxHoursToClose float64
+	minVolume       float64 // minimum total market volume in USD (0 = disabled)
 	sportBounds     map[string]SportBounds
 	client          *http.Client
 }
 
-func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose float64, sportBounds map[string]SportBounds) *Scanner {
+func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose, minVolume float64, sportBounds map[string]SportBounds) *Scanner {
 	if sportBounds == nil {
 		sportBounds = map[string]SportBounds{}
 	}
@@ -108,6 +109,7 @@ func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursT
 		maxSize:         maxSize,
 		minHoursToClose: minHoursToClose,
 		maxHoursToClose: maxHoursToClose,
+		minVolume:       minVolume,
 		sportBounds:     sportBounds,
 		client:          &http.Client{Timeout: 20 * time.Second},
 	}
@@ -183,6 +185,18 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		return nil, nil
 	}
 
+	// Volume check — only call Gamma API when price already qualifies to keep
+	// the hot path (no-op polls) free of extra HTTP requests.
+	if s.minVolume > 0 {
+		vol, err := s.fetchVolume(entry.ConditionID)
+		if err != nil {
+			log.Printf("[scanner] volume check error for %s: %v — allowing trade", entry.ConditionID[:12], err)
+		} else if vol < s.minVolume {
+			log.Printf("[scanner] skip %s — volume $%.0f below $%.0f threshold", entry.ConditionID[:12], vol, s.minVolume)
+			return nil, nil
+		}
+	}
+
 	rawSize := sizer(price)
 	if rawSize <= 0 {
 		return nil, nil
@@ -201,6 +215,32 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		SizeUSDC:    size,
 		Icon:        m.Icon,
 	}, nil
+}
+
+// fetchVolume calls the Gamma API to get the total trading volume (USD) for a
+// market. Only called when a market's price has already qualified, so the
+// extra HTTP round-trip only occurs on genuine trade candidates.
+func (s *Scanner) fetchVolume(conditionID string) (float64, error) {
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/markets?conditionId=%s", conditionID)
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return 0, fmt.Errorf("gamma API: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("gamma API returned %d", resp.StatusCode)
+	}
+
+	var markets []struct {
+		VolumeNum float64 `json:"volumeNum"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
+		return 0, fmt.Errorf("decode gamma response: %w", err)
+	}
+	if len(markets) == 0 {
+		return 0, nil
+	}
+	return markets[0].VolumeNum, nil
 }
 
 // Scan fetches active markets and returns those that pass all filters.

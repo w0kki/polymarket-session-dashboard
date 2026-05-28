@@ -92,6 +92,9 @@ func main() {
 		cfg.BaseballMinPrice*100, cfg.BaseballMaxPrice*100,
 		cfg.HockeyMinPrice*100, cfg.HockeyMaxPrice*100,
 	)
+	if cfg.MinVolume > 0 {
+		log.Printf("  Min volume: $%.0f", cfg.MinVolume)
+	}
 
 	scanner := market.NewScanner(
 		cfg.EntryThreshold,
@@ -100,6 +103,7 @@ func main() {
 		cfg.MaxPositionSize,
 		cfg.MinHoursToClose,
 		cfg.MaxHoursToClose,
+		cfg.MinVolume,
 		sportBounds,
 	)
 
