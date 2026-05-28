@@ -52,6 +52,14 @@ type Config struct {
 	HockeyMinPrice float64
 	HockeyMaxPrice float64
 
+	// Soccer (UCL, UEL, MLS, etc.): only trade in the final 30 minutes of a match
+	// (≈70th minute onward). EndDateISO is used as a proxy for elapsed game time.
+	// SOCCER_MIN_PRICE (default 0.94), SOCCER_MAX_PRICE (default 0.97)
+	// SOCCER_MAX_HOURS_TO_CLOSE (default 0.5 = 30 min remaining ≈ 70th minute)
+	SoccerMinPrice       float64
+	SoccerMaxPrice       float64
+	SoccerMaxHoursToClose float64
+
 	// Hard cap on position size regardless of Kelly output ($30).
 	MaxPositionSize float64
 
@@ -79,9 +87,25 @@ type Config struct {
 	TelegramBotToken  string // TELEGRAM_BOT_TOKEN
 	TelegramChatID    string // TELEGRAM_CHAT_ID
 
+	// Live trading credentials — only required when DRY_RUN=false.
+	// Generated once via py-clob-client; stored as env vars on the server.
+	PolyPrivateKey    string // POLY_PRIVATE_KEY   — EOA private key (hex, 0x-prefixed optional)
+	PolyAPIKey        string // POLY_API_KEY        — L2 API key (UUID)
+	PolyAPISecret     string // POLY_API_SECRET     — L2 API secret (base64url)
+	PolyAPIPassphrase string // POLY_API_PASSPHRASE — L2 passphrase (hex)
+
 	// Fallback position size when Kelly can't be computed (not enough
 	// loss data yet). Kelly requires at least one loss to calculate b.
 	FallbackSize float64
+
+	// ── Stop loss ─────────────────────────────────────────────────────────────
+
+	// If a held token's price drops by this many cents from the entry price,
+	// the bot paper-sells the position immediately rather than riding it to zero.
+	// e.g. 0.50 = exit if price falls 50¢ from entry (96¢ entry → 46¢ stop).
+	// Set to 0 to disable stop losses entirely.
+	// STOP_LOSS_DROP (default 0.50)
+	StopLossDrop float64
 
 	// ── Safety nets ───────────────────────────────────────────────────────────
 
@@ -111,6 +135,9 @@ func Load() *Config {
 		BaseballMaxPrice: envFloat("BASEBALL_MAX_PRICE", 0.955),
 		HockeyMinPrice:   envFloat("HOCKEY_MIN_PRICE", 0.95),
 		HockeyMaxPrice:   envFloat("HOCKEY_MAX_PRICE", 0.97),
+		SoccerMinPrice:       envFloat("SOCCER_MIN_PRICE", 0.94),
+		SoccerMaxPrice:       envFloat("SOCCER_MAX_PRICE", 0.97),
+		SoccerMaxHoursToClose: envFloat("SOCCER_MAX_HOURS_TO_CLOSE", 0.5),
 		MaxPositionSize: envFloat("MAX_POSITION_SIZE", 30.0),
 		MinVolume:       envFloat("MIN_VOLUME", 50000.0),
 		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
@@ -120,6 +147,11 @@ func Load() *Config {
 		DiscordWebhookURL: envString("DISCORD_WEBHOOK_URL", ""),
 		TelegramBotToken:  envString("TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:    envString("TELEGRAM_CHAT_ID", ""),
+		PolyPrivateKey:    envString("POLY_PRIVATE_KEY", ""),
+		PolyAPIKey:        envString("POLY_API_KEY", ""),
+		PolyAPISecret:     envString("POLY_API_SECRET", ""),
+		PolyAPIPassphrase: envString("POLY_API_PASSPHRASE", ""),
+		StopLossDrop:    envFloat("STOP_LOSS_DROP", 0.50),
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
 		ConsecLossLimit: envInt("CONSEC_LOSS_LIMIT", 3),
