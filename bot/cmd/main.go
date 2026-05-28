@@ -254,12 +254,15 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 	runStopLoss(ctx, cfg, database, scanner, exec, n)
 
 	// Load bankroll (configured starting budget) and compute current balance.
+	// currentBalance = bankroll + live-trade P&L only.
+	// Paper P&L is excluded: the bankroll is set to the current wallet balance
+	// so adding backtested paper profits would inflate the number falsely.
 	bankroll, err := database.GetBankroll()
 	if err != nil || bankroll <= 0 {
 		bankroll = cfg.FallbackSize * 3
 	}
-	allTimePnL, _ := database.GetAllTimePnL()
-	currentBalance := bankroll + allTimePnL
+	liveAllTimePnL, _ := database.GetLiveAllTimePnL()
+	currentBalance := bankroll + liveAllTimePnL
 
 	stats, err := database.GetTradeStats()
 	if err != nil {
@@ -321,9 +324,9 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 
 func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalance float64, n *notify.Notifier) bool {
 	// 1. Bankroll floor — hard stop, requires manual restart.
-	// Floor = configured bankroll × BankrollFloorPct (default 30%).
-	// currentBalance = bankroll + all-time resolved P&L, so it reflects
-	// actual gains/losses rather than the static configured figure.
+	// Floor = configured bankroll × BankrollFloorPct (default 50%).
+	// currentBalance = bankroll + live-trade P&L only (paper excluded),
+	// so it tracks real money movement against the wallet balance.
 	floor := bankroll * cfg.BankrollFloorPct
 	if bankroll > 0 && currentBalance < floor {
 		n.BankrollFloor(currentBalance, floor)
@@ -642,7 +645,9 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			liveTrades, _ := database.GetOpenLiveTrades()
 			todayPnL, _ := database.GetTodayPnL()
 			allPnL, _ := database.GetAllTimePnL()
+			livePnL, _ := database.GetLiveAllTimePnL()
 			bankroll, _ := database.GetBankroll()
+			balance := bankroll + livePnL // live P&L only — paper profits excluded
 			n.Broadcast(fmt.Sprintf(
 				"📊 BOT STATUS\n"+
 					"Mode: %s (override: %s)\n"+
@@ -658,7 +663,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 				len(liveTrades),
 				todayPnL,
 				allPnL,
-				bankroll, bankroll+allPnL,
+				bankroll, balance,
 			))
 
 		case "clearbreaker":
