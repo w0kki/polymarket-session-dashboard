@@ -86,10 +86,11 @@ func FeeRate(sport string) float64 {
 	}
 }
 
-// CalcBuyFee computes the Polymarket buy fee for a position.
-//
-//	fee = shares × price × feeRate × price × (1 − price)
-func CalcBuyFee(shares, price float64, sport string) float64 {
-	r := FeeRate(sport)
-	return shares * price * r * price * (1 - price)
+// CalcBuyFee computes the Polymarket CLOB taker fee for a buy order.
+// Taker fee = 2% of USDC spent (shares × price).
+// The sport parameter is kept for API compatibility but is no longer used —
+// CLOB taker fees are flat across all market categories.
+func CalcBuyFee(shares, price float64, _ string) float64 {
+	const takerFeeRate = 0.02 // 2% CLOB taker fee
+	return shares * price * takerFeeRate
 }
