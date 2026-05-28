@@ -94,6 +94,14 @@ func (n *Notifier) DailyLossLimit(todayPnL, limit float64) {
 	))
 }
 
+// StopLossTriggered fires when a position is exited early via stop loss.
+func (n *Notifier) StopLossTriggered(market, side, sport string, exitPrice, netPnl, saved float64) {
+	n.send(fmt.Sprintf(
+		"⛔ STOP LOSS (%s)\n%s\n▶ %s exited @ %.1f¢ | Loss: -$%.2f | Saved $%.2f vs full loss",
+		sport, market, side, exitPrice*100, -netPnl, saved,
+	))
+}
+
 // BankrollFloor fires just before the bot shuts itself down.
 func (n *Notifier) BankrollFloor(balance, floor float64) {
 	n.send(fmt.Sprintf(
