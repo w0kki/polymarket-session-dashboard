@@ -395,14 +395,20 @@ func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt int6
 }
 
 // computeDomainSeparator pre-computes the EIP-712 domain separator once at
-// startup.  Domain: name="ClobAuthDomain", version="1", chainId=137,
-// verifyingContract=CTF Exchange.
+// startup.
+//
+// "ClobAuthDomain" is the domain for L2 API-key authentication (the POLY_*
+// request headers). Order signing uses the CTF Exchange contract's own domain:
+// name="Polymarket CTF Exchange", version="1", chainId=137.
+//
+// Using the wrong domain produces a valid-looking but unverifiable signature —
+// the CLOB rejects it with HTTP 400 "Invalid order payload".
 func (l *LiveExecutor) computeDomainSeparator() []byte {
-	typeHash  := keccak256([]byte(domainTypeSig))
-	nameHash  := keccak256([]byte("ClobAuthDomain"))
+	typeHash    := keccak256([]byte(domainTypeSig))
+	nameHash    := keccak256([]byte("Polymarket CTF Exchange"))
 	versionHash := keccak256([]byte("1"))
-	chainID   := padBigInt(big.NewInt(polygonChainID))
-	contract  := padHexAddr(ctfExchangeAddr)
+	chainID     := padBigInt(big.NewInt(polygonChainID))
+	contract    := padHexAddr(ctfExchangeAddr)
 
 	return keccak256(concatBytes(typeHash, nameHash, versionHash, chainID, contract))
 }
