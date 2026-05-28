@@ -42,6 +42,10 @@ func (n *Notifier) Enabled() bool {
 	return n.discord != nil || n.telegram != nil
 }
 
+// Broadcast sends plain text to all channels. Public alias used by the
+// Telegram command handler so it can send replies without importing internals.
+func (n *Notifier) Broadcast(plain string) { n.broadcast(plain) }
+
 // broadcast sends plain text to all channels (used for system alerts without a link).
 func (n *Notifier) broadcast(plain string) {
 	if n.discord != nil {

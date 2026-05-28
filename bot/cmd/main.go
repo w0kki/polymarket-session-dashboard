@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -63,6 +64,25 @@ func main() {
 		log.Fatalf("cannot open database: %v", err)
 	}
 	defer database.Close()
+
+	// ── Mode override (set via Telegram /live or /paper command) ──────────────
+	// Allows switching modes without editing ecosystem.config.cjs manually.
+	if override, _ := database.GetSetting("mode_override"); override != "" {
+		switch override {
+		case "live":
+			cfg.DryRun = false
+			log.Printf("  [mode_override] LIVE mode active (set via Telegram /live)")
+		case "paper":
+			cfg.DryRun = true
+			log.Printf("  [mode_override] PAPER mode active (set via Telegram /paper)")
+		}
+		// Re-log the effective mode.
+		mode = "PAPER"
+		if !cfg.DryRun {
+			mode = "LIVE"
+		}
+		log.Printf("  Effective mode: %s", mode)
+	}
 
 	// ── Executor ──────────────────────────────────────────────────────────────
 	var exec executor.Executor
@@ -138,6 +158,9 @@ func main() {
 	// ── Signal handling ───────────────────────────────────────────────────────
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// ── Telegram command listener ─────────────────────────────────────────────
+	notifier.ListenCommands(ctx, makeCmdHandler(cfg, database, notifier))
 
 	// ── Two-speed loop ────────────────────────────────────────────────────────
 	// 1. Discovery (slow): full market scan → rebuilds watchlist + resolves trades
@@ -566,6 +589,109 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ── Telegram command handler ──────────────────────────────────────────────────
+
+// makeCmdHandler returns a CommandHandler that processes Telegram slash commands.
+// Supported commands:
+//
+//	/status        — current mode, circuit breaker, open positions, today's P&L
+//	/clearbreaker  — clear an active circuit breaker immediately
+//	/stop          — graceful shutdown (pm2 will restart in paper mode)
+//	/live          — switch to live trading on next restart
+//	/paper         — switch to paper trading on next restart
+func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) notify.CommandHandler {
+	selfSignal := func() {
+		p, err := os.FindProcess(os.Getpid())
+		if err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
+	}
+
+	return func(cmd, _ string) {
+		switch cmd {
+
+		case "status":
+			mode := "PAPER"
+			if !cfg.DryRun {
+				mode = "LIVE"
+			}
+			breaker, _ := database.GetSetting("circuit_breaker_until")
+			breakerMsg := "none"
+			if breaker != "" {
+				breakerMsg = "ACTIVE until " + breaker
+			}
+			override, _ := database.GetSetting("mode_override")
+			if override == "" {
+				override = "none (using DRY_RUN env)"
+			}
+			paperTrades, _ := database.GetOpenPaperTrades()
+			liveTrades, _ := database.GetOpenLiveTrades()
+			todayPnL, _ := database.GetTodayPnL()
+			allPnL, _ := database.GetAllTimePnL()
+			bankroll, _ := database.GetBankroll()
+			n.Broadcast(fmt.Sprintf(
+				"📊 BOT STATUS\n"+
+					"Mode: %s (override: %s)\n"+
+					"Circuit breaker: %s\n"+
+					"Open paper trades: %d\n"+
+					"Open live trades: %d\n"+
+					"Today P&L: $%.2f\n"+
+					"All-time P&L: $%.2f\n"+
+					"Bankroll: $%.2f | Balance: $%.2f",
+				mode, override,
+				breakerMsg,
+				len(paperTrades),
+				len(liveTrades),
+				todayPnL,
+				allPnL,
+				bankroll, bankroll+allPnL,
+			))
+
+		case "clearbreaker":
+			if err := database.SetSetting("circuit_breaker_until", ""); err != nil {
+				n.Broadcast("❌ Failed to clear circuit breaker: " + err.Error())
+				return
+			}
+			log.Println("[cmd] circuit breaker cleared via Telegram")
+			n.Broadcast("✅ Circuit breaker cleared — trading resumed.")
+
+		case "stop":
+			n.Broadcast("🛑 Bot stopping on Telegram command. pm2 will restart it in paper mode.")
+			log.Println("[cmd] stop requested via Telegram")
+			selfSignal()
+
+		case "live":
+			if err := database.SetSetting("mode_override", "live"); err != nil {
+				n.Broadcast("❌ Failed to set live mode: " + err.Error())
+				return
+			}
+			n.Broadcast("🟢 Switching to LIVE mode — restarting now...")
+			log.Println("[cmd] switching to LIVE mode via Telegram")
+			selfSignal()
+
+		case "paper":
+			if err := database.SetSetting("mode_override", "paper"); err != nil {
+				n.Broadcast("❌ Failed to set paper mode: " + err.Error())
+				return
+			}
+			n.Broadcast("📝 Switching to PAPER mode — restarting now...")
+			log.Println("[cmd] switching to PAPER mode via Telegram")
+			selfSignal()
+
+		default:
+			n.Broadcast(fmt.Sprintf(
+				"❓ Unknown command: /%s\n\nAvailable commands:\n"+
+					"/status — bot state & P&L\n"+
+					"/clearbreaker — clear circuit breaker\n"+
+					"/live — switch to live trading\n"+
+					"/paper — switch to paper trading\n"+
+					"/stop — graceful shutdown",
+				cmd,
+			))
+		}
+	}
 }
 
 // ── Resolve open trades ───────────────────────────────────────────────────────
