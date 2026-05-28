@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -609,7 +610,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 		}
 	}
 
-	return func(cmd, _ string) {
+	return func(cmd, args string) {
 		switch cmd {
 
 		case "status":
@@ -657,6 +658,24 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			log.Println("[cmd] circuit breaker cleared via Telegram")
 			n.Broadcast("✅ Circuit breaker cleared — trading resumed.")
 
+		case "bankroll":
+			amount, err := strconv.ParseFloat(args, 64)
+			if err != nil || amount <= 0 {
+				n.Broadcast("❌ Usage: /bankroll <amount>  e.g. /bankroll 1500")
+				return
+			}
+			old, _ := database.GetBankroll()
+			if err := database.SetSetting("bankroll", fmt.Sprintf("%.2f", amount)); err != nil {
+				n.Broadcast("❌ Failed to update bankroll: " + err.Error())
+				return
+			}
+			floor := amount * cfg.BankrollFloorPct
+			log.Printf("[cmd] bankroll updated $%.2f → $%.2f via Telegram", old, amount)
+			n.Broadcast(fmt.Sprintf(
+				"💰 Bankroll updated: $%.2f → $%.2f\nFloor (%.0f%%): $%.2f",
+				old, amount, cfg.BankrollFloorPct*100, floor,
+			))
+
 		case "stop":
 			n.Broadcast("🛑 Bot stopping on Telegram command. pm2 will restart it in paper mode.")
 			log.Println("[cmd] stop requested via Telegram")
@@ -684,6 +703,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			n.Broadcast(fmt.Sprintf(
 				"❓ Unknown command: /%s\n\nAvailable commands:\n"+
 					"/status — bot state & P&L\n"+
+					"/bankroll <amount> — update bankroll e.g. /bankroll 1500\n"+
 					"/clearbreaker — clear circuit breaker\n"+
 					"/live — switch to live trading\n"+
 					"/paper — switch to paper trading\n"+
