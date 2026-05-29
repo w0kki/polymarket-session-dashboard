@@ -202,7 +202,7 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 			Timestamp:     fmt.Sprintf("%d", tsMs),
 			TokenID:       opp.TokenID,
 		},
-		OrderType: "FOK",
+		OrderType: "FAK",
 		Owner:     l.apiKey,
 	}
 
@@ -340,7 +340,7 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 			Timestamp:     fmt.Sprintf("%d", tsMs),
 			TokenID:       tokenID,
 		},
-		OrderType: "FOK",
+		OrderType: "FAK",
 		Owner:     l.apiKey,
 	}
 
