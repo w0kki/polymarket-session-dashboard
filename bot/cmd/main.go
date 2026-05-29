@@ -547,11 +547,25 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalan
 
 // ── Stop loss ─────────────────────────────────────────────────────────────────
 
+// effectiveStopLoss returns the live stop-loss drop (in price fraction, e.g.
+// 0.40 = 40¢). It reads the runtime override from the settings table (set via
+// the Telegram /stoploss command) and falls back to the STOP_LOSS_DROP env
+// value when no override is present. This lets the stop-loss be tuned live
+// without a restart — the same pattern as the bankroll setting.
+func effectiveStopLoss(cfg *config.Config, database *db.DB) float64 {
+	if raw, _ := database.GetSetting("stop_loss_drop"); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return cfg.StopLossDrop
+}
+
 // runStopLoss checks every open trade (paper and live) against the configured
 // stop loss price. For paper trades it updates the DB directly. For live trades
 // it places a real SELL order on the CLOB before updating the DB.
 func runStopLoss(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, exec executor.Executor, n *notify.Notifier) {
-	if cfg.StopLossDrop <= 0 {
+	if effectiveStopLoss(cfg, database) <= 0 {
 		return // feature disabled
 	}
 
@@ -600,7 +614,7 @@ func checkPaperStopLoss(ctx context.Context, cfg *config.Config, database *db.DB
 	if !open {
 		return // market settled — let resolveOpenTrades handle it
 	}
-	stopThreshold := t.EntryPrice - cfg.StopLossDrop
+	stopThreshold := t.EntryPrice - effectiveStopLoss(cfg, database)
 	if price >= stopThreshold {
 		return // still above threshold, hold
 	}
@@ -635,7 +649,7 @@ func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB,
 	if !open {
 		return // settled — let resolveLiveTrades handle it
 	}
-	stopThreshold := t.EntryPrice - cfg.StopLossDrop
+	stopThreshold := t.EntryPrice - effectiveStopLoss(cfg, database)
 	if price >= stopThreshold {
 		return // still above threshold, hold
 	}
@@ -780,8 +794,10 @@ func min(a, b int) int {
 // makeCmdHandler returns a CommandHandler that processes Telegram slash commands.
 // Supported commands:
 //
-//	/status        — current mode, circuit breaker, open positions, today's P&L
+//	/status        — current mode, circuit breaker, stop-loss, positions, P&L
 //	/clearbreaker  — clear an active circuit breaker immediately
+//	/bankroll <n>  — set the bankroll used for Kelly sizing
+//	/stoploss <c>  — set the stop-loss drop in cents (e.g. /stoploss 25)
 //	/stop          — graceful shutdown (pm2 will restart in paper mode)
 //	/live          — switch to live trading on next restart
 //	/paper         — switch to paper trading on next restart
@@ -817,10 +833,12 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			bankroll, since, _ := database.GetBankroll()
 			livePnLSince, _ := database.GetLivePnLSince(since)
 			balance := bankroll + livePnLSince
+			stopDrop := effectiveStopLoss(cfg, database)
 			n.Broadcast(fmt.Sprintf(
 				"📊 BOT STATUS\n"+
 					"Mode: %s (override: %s)\n"+
 					"Circuit breaker: %s\n"+
+					"Stop-loss: %.0f¢ drop\n"+
 					"Open paper trades: %d\n"+
 					"Open live trades: %d\n"+
 					"Today P&L: $%.2f\n"+
@@ -828,6 +846,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 					"Bankroll: $%.2f | Balance: $%.2f",
 				mode, override,
 				breakerMsg,
+				stopDrop*100,
 				len(paperTrades),
 				len(liveTrades),
 				todayPnL,
@@ -859,6 +878,32 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			n.Broadcast(fmt.Sprintf(
 				"💰 Bankroll updated: $%.2f → $%.2f\nFloor (%.0f%%): $%.2f\nBalance resets to $%.2f — only new live trades will adjust it.",
 				old, amount, cfg.BankrollFloorPct*100, floor, amount,
+			))
+
+		case "stoploss":
+			v, err := strconv.ParseFloat(args, 64)
+			if err != nil || v <= 0 {
+				n.Broadcast("❌ Usage: /stoploss <cents>  e.g. /stoploss 25  (or /stoploss 0.25)")
+				return
+			}
+			// Accept cents (≥1, e.g. 25 → 0.25) or a fraction (<1, e.g. 0.25).
+			drop := v
+			if v >= 1 {
+				drop = v / 100
+			}
+			if drop <= 0 || drop >= 1 {
+				n.Broadcast("❌ Stop-loss must be between 1¢ and 99¢.")
+				return
+			}
+			oldDrop := effectiveStopLoss(cfg, database)
+			if err := database.SetSetting("stop_loss_drop", fmt.Sprintf("%.4f", drop)); err != nil {
+				n.Broadcast("❌ Failed to update stop-loss: " + err.Error())
+				return
+			}
+			log.Printf("[cmd] stop-loss drop %.0f¢ → %.0f¢ via Telegram", oldDrop*100, drop*100)
+			n.Broadcast(fmt.Sprintf(
+				"🛡 Stop-loss updated: %.0f¢ → %.0f¢ drop.\nA 95¢ entry now exits at %.0f¢. Takes effect on the next stop-loss check (no restart).",
+				oldDrop*100, drop*100, (0.95-drop)*100,
 			))
 
 		case "kill":
