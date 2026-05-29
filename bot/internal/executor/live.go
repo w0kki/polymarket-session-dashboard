@@ -296,12 +296,25 @@ func (l *LiveExecutor) VerifyCredentials(ctx context.Context) error {
 	return nil
 }
 
-// PlaceSellOrder places a FOK SELL order on the CLOB to exit a live position.
+// sellSlippage is how far below the quoted price a stop-loss SELL will accept.
+// A SELL fills against the best BID, which always sits below the quote by the
+// spread. Demanding the full quoted price means the order can never cross and
+// just rests as status:delayed. We discount the minimum USDC we'll accept so
+// the FAK order crosses the spread and exits immediately — for a stop loss,
+// getting out reliably matters more than squeezing the last cent.
+const sellSlippage = 0.15
+
+// PlaceSellOrder places a FAK SELL order on the CLOB to exit a live position.
+// stopPrice is the current quoted price at which the stop triggered.
 func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string, shares, stopPrice float64, negRisk bool) error {
-	// CLOB V2 precision: token makerAmount max 4 decimal places (÷100),
-	// USDC takerAmount max 2 decimal places (÷10000).
+	// makerAmount: tokens we give up — 4 decimal place precision (÷100).
 	makerAmt := (int64(shares*1e6+0.5) / 100) * 100
-	takerAmt := (int64(shares*stopPrice*1e6+0.5) / 10000) * 10000
+
+	// takerAmount: minimum USDC we'll accept. Discount by sellSlippage so the
+	// order crosses the spread and fills against the best available bid rather
+	// than resting unfilled at the quoted price.
+	minPrice := stopPrice * (1 - sellSlippage)
+	takerAmt := (int64(shares*minPrice*1e6+0.5) / 10000) * 10000
 
 	tokenIDBig := new(big.Int)
 	if _, ok := tokenIDBig.SetString(tokenID, 10); !ok {
@@ -390,8 +403,17 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 		return fmt.Errorf("live sell: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
 	}
 
-	log.Printf("[LIVE] ⛔ SELL stop-loss | %s @ %.1f¢ | %.2f shares | resp=%v",
-		side, stopPrice*100, shares, result)
+	// Verify the sell order actually filled — same check as PlaceOrder.
+	// A status:delayed sell means the position is still open; return an error
+	// so the DB is NOT updated to STOP_LOSS and the bot retries next poll.
+	status, _ := result["status"].(string)
+	makingAmt, _ := result["makingAmount"].(string)
+	if status != "matched" || makingAmt == "" {
+		return fmt.Errorf("live sell: order not filled (status=%q makingAmount=%q) — position still open", status, makingAmt)
+	}
+
+	log.Printf("[LIVE] ⛔ SELL stop-loss | %s @ %.1f¢ | %.2f shares | status=%s",
+		side, stopPrice*100, shares, status)
 	return nil
 }
 
