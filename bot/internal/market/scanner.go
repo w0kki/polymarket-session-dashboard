@@ -294,9 +294,19 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		}
 	}
 
-	side, price := bestOutcome(*m)
+	side, stalePrice := bestOutcome(*m)
 	if side == "" {
 		return nil, nil
+	}
+
+	// Look up the token_id for the favored side up front — needed both for the
+	// live order-book lookup and for live order placement.
+	tokenID := ""
+	for _, tok := range m.Tokens {
+		if tok.Outcome == side {
+			tokenID = tok.TokenID
+			break
+		}
 	}
 
 	// Apply per-sport price bounds (same logic as Scan)
@@ -310,6 +320,22 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 			maxPrice = bounds.MaxPrice
 		}
 	}
+
+	// token.price is the last-trade price and lags the live book in fast
+	// markets (e.g. it read 90.5¢ for a favorite whose live ask was 96¢). When
+	// the stale price is anywhere near the band, confirm against the live order
+	// book and use the best ASK — the price we'd actually pay — for the entry
+	// decision. The pre-screen keeps book fetches rare (only near-band markets).
+	price := stalePrice
+	if tokenID != "" && stalePrice >= minPrice-0.10 {
+		if _, ask, ok := s.fetchBook(tokenID); ok {
+			if (ask >= minPrice && (maxPrice <= 0 || ask <= maxPrice)) && ask != stalePrice {
+				log.Printf("[scanner] %s: live ask %.3f (token.price %.3f stale) — using book", side, ask, stalePrice)
+			}
+			price = ask
+		}
+	}
+
 	if price < minPrice || (maxPrice > 0 && price > maxPrice) {
 		return nil, nil
 	}
@@ -332,15 +358,6 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 	}
 	size := min64(rawSize, s.maxSize)
 	shares := size / price
-
-	// Look up the token_id for the winning side — required for live order placement.
-	tokenID := ""
-	for _, tok := range m.Tokens {
-		if tok.Outcome == side {
-			tokenID = tok.TokenID
-			break
-		}
-	}
 
 	return &Opportunity{
 		ConditionID: m.ConditionID,
@@ -404,6 +421,47 @@ func (s *Scanner) fetchVolume(conditionID string) (float64, error) {
 		return 0, nil
 	}
 	return markets[0].VolumeNum, nil
+}
+
+// fetchBook returns the best bid and best ask for a token from the live CLOB
+// order book. Used to get an up-to-date entry price, since the market
+// endpoint's token.price field is the last-trade price and lags the book in
+// fast-moving live markets. Returns ok=false on error or an empty ask side.
+func (s *Scanner) fetchBook(tokenID string) (bestBid, bestAsk float64, ok bool) {
+	url := fmt.Sprintf("https://clob.polymarket.com/book?token_id=%s", tokenID)
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, 0, false
+	}
+	var book struct {
+		Bids []struct {
+			Price string `json:"price"`
+		} `json:"bids"`
+		Asks []struct {
+			Price string `json:"price"`
+		} `json:"asks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&book); err != nil {
+		return 0, 0, false
+	}
+	for _, b := range book.Bids {
+		if p, err := strconv.ParseFloat(b.Price, 64); err == nil && p > bestBid {
+			bestBid = p
+		}
+	}
+	for _, a := range book.Asks {
+		if p, err := strconv.ParseFloat(a.Price, 64); err == nil && (bestAsk == 0 || p < bestAsk) {
+			bestAsk = p
+		}
+	}
+	if bestAsk == 0 {
+		return 0, 0, false
+	}
+	return bestBid, bestAsk, true
 }
 
 // Scan fetches active markets and returns those that pass all filters.
