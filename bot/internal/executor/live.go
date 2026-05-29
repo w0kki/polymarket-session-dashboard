@@ -138,8 +138,11 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: no token_id for %s side=%q", opp.ConditionID[:12], opp.Side)
 	}
 
-	makerAmt := int64(opp.SizeUSDC*1e6 + 0.5)
-	takerAmt := int64(opp.Shares*1e6 + 0.5)
+	// CLOB V2 precision: makerAmount (USDC) max 2 decimal places → round to
+	// nearest 10,000 micro-USDC (whole cents). takerAmount (tokens) max 4
+	// decimal places → round to nearest 100 micro-tokens.
+	makerAmt := (int64(opp.SizeUSDC*1e6+0.5) / 10000) * 10000
+	takerAmt := (int64(opp.Shares*1e6+0.5) / 100) * 100
 
 	tokenID := new(big.Int)
 	if _, ok := tokenID.SetString(opp.TokenID, 10); !ok {
@@ -274,8 +277,10 @@ func (l *LiveExecutor) VerifyCredentials(ctx context.Context) error {
 
 // PlaceSellOrder places a FOK SELL order on the CLOB to exit a live position.
 func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string, shares, stopPrice float64, negRisk bool) error {
-	makerAmt := int64(shares*1e6 + 0.5)
-	takerAmt := int64(shares*stopPrice*1e6 + 0.5)
+	// CLOB V2 precision: token makerAmount max 4 decimal places (÷100),
+	// USDC takerAmount max 2 decimal places (÷10000).
+	makerAmt := (int64(shares*1e6+0.5) / 100) * 100
+	takerAmt := (int64(shares*stopPrice*1e6+0.5) / 10000) * 10000
 
 	tokenIDBig := new(big.Int)
 	if _, ok := tokenIDBig.SetString(tokenID, 10); !ok {
