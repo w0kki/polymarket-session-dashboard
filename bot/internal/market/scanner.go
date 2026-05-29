@@ -77,6 +77,7 @@ type Opportunity struct {
 	Price       float64 // token price (e.g. 0.94)
 	Shares      float64 // position_size / price
 	SizeUSDC    float64 // final position size after Kelly + cap
+	MaxPrice    float64 // sport price ceiling — used to compute takerAmount slippage tolerance
 	Icon        string
 	NegRisk     bool    // true = Neg Risk CTF Exchange; false = regular CTF Exchange
 }
@@ -251,6 +252,7 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		SizeUSDC:    size,
 		Icon:        m.Icon,
 		NegRisk:     entry.NegRisk,
+		MaxPrice:    maxPrice,
 	}, nil
 }
 

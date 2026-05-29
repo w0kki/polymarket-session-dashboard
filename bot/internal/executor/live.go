@@ -138,11 +138,21 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: no token_id for %s side=%q", opp.ConditionID[:12], opp.Side)
 	}
 
-	// CLOB V2 precision: makerAmount (USDC) max 2 decimal places → round to
-	// nearest 10,000 micro-USDC (whole cents). takerAmount (tokens) max 4
-	// decimal places → round to nearest 100 micro-tokens.
+	// makerAmount: USDC we spend — 2 decimal place precision (round to 10,000 µUSDC).
 	makerAmt := (int64(opp.SizeUSDC*1e6+0.5) / 10000) * 10000
-	takerAmt := (int64(opp.Shares*1e6+0.5) / 100) * 100
+
+	// takerAmount: tokens we accept. Use the sport price CEILING (MaxPrice) as
+	// the denominator so the FAK order fills at any price within the valid range.
+	// Computing from the exact observed price means even 0.5¢ of ask drift causes
+	// the order to queue (delayed) instead of filling immediately.
+	// e.g. Tennis ceiling = 0.97 → we accept ≥ (size/0.97) tokens, filling at
+	// any ask from observed price up to 97¢.
+	ceilPrice := opp.MaxPrice
+	if ceilPrice <= 0 {
+		ceilPrice = opp.Price // fallback if MaxPrice not set
+	}
+	takerShares := opp.SizeUSDC / ceilPrice
+	takerAmt := (int64(takerShares*1e6+0.5) / 100) * 100
 
 	tokenID := new(big.Int)
 	if _, ok := tokenID.SetString(opp.TokenID, 10); !ok {
