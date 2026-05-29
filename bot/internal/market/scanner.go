@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -103,6 +105,9 @@ type Scanner struct {
 	minVolume       float64 // minimum total market volume in USD (0 = disabled)
 	sportBounds     map[string]SportBounds
 	client          *http.Client
+
+	gameIDMu    sync.Mutex     // guards gameIDCache
+	gameIDCache map[string]int // slug → gameId (0 = resolved-but-none)
 }
 
 func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose, minVolume float64, sportBounds map[string]SportBounds) *Scanner {
@@ -119,7 +124,104 @@ func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursT
 		minVolume:       minVolume,
 		sportBounds:     sportBounds,
 		client:          &http.Client{Timeout: 20 * time.Second},
+		gameIDCache:     map[string]int{},
 	}
+}
+
+// ResolveGameID maps a market slug to its Polymarket sports gameId via the
+// Gamma events API. Cached in memory (slug→gameId) since the mapping is static.
+// Returns (0, false) when the event has no associated gameId (non-sports market).
+func (s *Scanner) ResolveGameID(slug string) (int, bool) {
+	s.gameIDMu.Lock()
+	if id, ok := s.gameIDCache[slug]; ok {
+		s.gameIDMu.Unlock()
+		return id, id != 0
+	}
+	s.gameIDMu.Unlock()
+
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/events?slug=%s", slug)
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return 0, false // transient — don't cache failures
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, false
+	}
+	var events []struct {
+		GameID int `json:"gameId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil || len(events) == 0 {
+		return 0, false
+	}
+	id := events[0].GameID
+
+	s.gameIDMu.Lock()
+	s.gameIDCache[slug] = id
+	s.gameIDMu.Unlock()
+	return id, id != 0
+}
+
+// periodNum parses a tennis period string ("S3", "TB4") into its set number.
+// Returns 0 if unparseable.
+func periodNum(period string) int {
+	p := strings.ToUpper(strings.TrimSpace(period))
+	p = strings.TrimPrefix(p, "TB")
+	p = strings.TrimPrefix(p, "S")
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// currentSetMaxGames parses the games count of the current set from a tennis
+// score string and returns the higher of the two players' game counts.
+// Score formats: "2-1" (current set only) or "6-4, 3-6, 5-4" (set history,
+// last segment = current set). Returns 0 if unparseable.
+func currentSetMaxGames(score string) int {
+	score = strings.TrimSpace(score)
+	if score == "" {
+		return 0
+	}
+	segs := strings.Split(score, ",")
+	last := strings.TrimSpace(segs[len(segs)-1])
+	// Strip any tiebreak annotation: "7-6(7-5)" → "7-6".
+	if i := strings.Index(last, "("); i >= 0 {
+		last = last[:i]
+	}
+	parts := strings.SplitN(last, "-", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	a, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+	b, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// TennisSetStageOK reports whether a tennis match is far enough along to trade,
+// given minSet (e.g. 3). Allows entry when:
+//   - the match is in set minSet or later (e.g. "during the 3rd set"), OR
+//   - it is in the immediately prior set with someone serving for it
+//     (≥5 games — i.e. "the end of the 2nd set").
+func TennisSetStageOK(period, score string, minSet int) bool {
+	if minSet <= 0 {
+		return true // gating disabled
+	}
+	n := periodNum(period)
+	if n == 0 {
+		return false // unknown set — fail closed
+	}
+	if n >= minSet {
+		return true
+	}
+	if n == minSet-1 && currentSetMaxGames(score) >= 5 {
+		return true
+	}
+	return false
 }
 
 // WatchlistEntry is a market that passed all non-price filters and is being

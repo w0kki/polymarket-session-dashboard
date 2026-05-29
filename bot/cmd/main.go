@@ -375,6 +375,28 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 			continue // price doesn't qualify right now
 		}
 
+		// Tennis set-stage gate: only enter late in the match (end of 2nd set
+		// or during the 3rd+), using live state from the sports_collector sidecar.
+		if opp.Sport == "Tennis" && cfg.TennisMinSet > 0 {
+			gameID, ok := scanner.ResolveGameID(opp.Slug)
+			if !ok {
+				log.Printf("[poll] tennis gate: no gameId for %s — skipping", opp.Slug)
+				continue
+			}
+			ls, _ := database.GetLiveSport(gameID)
+			if ls == nil || !ls.Live {
+				log.Printf("[poll] tennis gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
+				continue
+			}
+			if !market.TennisSetStageOK(ls.Period, ls.Score, cfg.TennisMinSet) {
+				log.Printf("[poll] tennis gate: game %d in %s (score %q) — below set %d, skipping %s",
+					gameID, ls.Period, ls.Score, cfg.TennisMinSet, opp.Side)
+				continue
+			}
+			log.Printf("[poll] tennis gate: ✓ game %d in %s (score %q) — set ≥ %d OK",
+				gameID, ls.Period, ls.Score, cfg.TennisMinSet)
+		}
+
 		// Price qualifies — execute.
 		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f",
 			opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC)

@@ -123,6 +123,18 @@ type Config struct {
 	// Number of consecutive losses that triggers a 24-hour trading pause.
 	ConsecLossLimit int
 
+	// Minimum tennis set required to enter. Live set state comes from the
+	// sports_collector.py sidecar (live_sports table). When > 0, a tennis
+	// market is only traded if the match is in this set or later — or in the
+	// immediately prior set with someone serving for it (≥5 games). This
+	// avoids early-match entries where a favorite still has lots of variance.
+	//   0 = disabled (no set gating)
+	//   3 = enter only during the 3rd set, or at the end of the 2nd
+	// If enabled and no fresh live state is available, the tennis market is
+	// skipped (fail-closed).
+	// TENNIS_MIN_SET (default 0)
+	TennisMinSet int
+
 	// Bankroll floor expressed as a fraction of the current bankroll.
 	// Bot shuts down entirely if balance falls below (bankroll × floor pct).
 	// e.g. 0.30 = stop if balance drops to 30% of starting bankroll (70% loss).
@@ -165,6 +177,7 @@ func Load() *Config {
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
 		ConsecLossLimit: envInt("CONSEC_LOSS_LIMIT", 3),
+		TennisMinSet:    envInt("TENNIS_MIN_SET", 0),
 		BankrollFloorPct: envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }

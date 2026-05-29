@@ -225,6 +225,40 @@ func (d *DB) SetSetting(key, value string) error {
 	return err
 }
 
+// ── Live sports state (written by sports_collector.py sidecar) ───────────────
+
+// LiveSport is the current live state of a game from Polymarket's sports feed.
+type LiveSport struct {
+	GameID    int
+	Sport     string // "tennis", "basketball", etc.
+	Period    string // tennis: "S1".."S5", "TB1".."TB5"; null/"" if unknown
+	Score     string // e.g. "6-4, 3-6, 5-4" or "2-1"
+	Live      bool
+	Ended     bool
+	UpdatedAt string // UTC "2006-01-02 15:04:05"
+}
+
+// GetLiveSport returns the live state for a gameId, or (nil, nil) if the
+// sidecar has no row for it yet. Missing table is treated as no data.
+func (d *DB) GetLiveSport(gameID int) (*LiveSport, error) {
+	var s LiveSport
+	var live, ended int
+	err := d.conn.QueryRow(`
+		SELECT game_id, sport, period, score, live, ended, updated_at
+		FROM live_sports WHERE game_id = ?
+	`, gameID).Scan(&s.GameID, &s.Sport, &s.Period, &s.Score, &live, &ended, &s.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		// Table may not exist yet if the sidecar hasn't started — treat as no data.
+		return nil, nil
+	}
+	s.Live = live == 1
+	s.Ended = ended == 1
+	return &s, nil
+}
+
 // ── Paper trade writes ───────────────────────────────────────────────────────
 
 // PaperTrade is what the bot inserts when DRY_RUN=true.
