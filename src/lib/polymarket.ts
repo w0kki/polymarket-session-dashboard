@@ -210,6 +210,7 @@ export function buildTradeLogRows(positions: Position[], activity: Activity[]): 
     rows.push({
       num: rows.length + 1,
       date,
+      ts: b.timestamp,
       market: b.title,
       sport,
       type: tradeType,

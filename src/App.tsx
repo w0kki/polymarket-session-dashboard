@@ -14,6 +14,10 @@ async function fetchPaperTrades(): Promise<TradeLogRow[]> {
       .map(r => ({
         num: 0,
         date: r.date,
+        // first_seen_at is UTC "YYYY-MM-DD HH:MM:SS"; fall back to date if missing.
+        ts: r.first_seen_at
+          ? Date.parse(r.first_seen_at.replace(' ', 'T') + 'Z') / 1000
+          : (r.date ? Date.parse(r.date + 'T00:00:00Z') / 1000 : 0),
         market: r.market,
         sport: r.sport,
         type: r.trade_type,
@@ -276,11 +280,50 @@ function KellyView({ stats, tradeLog }: { stats: SessionStats; tradeLog: TradeLo
 }
 
 function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
+  const [filter, setFilter] = useState<'all' | 'live' | 'paper'>('all');
+  const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc'); // newest first by default
+
+  const filtered = filter === 'live'
+    ? tradeLog.filter(r => r.type !== 'Paper')
+    : filter === 'paper'
+      ? tradeLog.filter(r => r.type === 'Paper')
+      : tradeLog;
+
+  // Sort by actual order time; each row keeps its chronological #.
+  const visible = [...filtered].sort((a, b) =>
+    sortDir === 'asc' ? a.ts - b.ts : b.ts - a.ts
+  );
+
   return (
     <section className="animate-fade-in">
-      <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
-        Trade Log ({tradeLog.length} trades)
-      </h2>
+      <div className="flex items-center gap-3 mb-3">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+          Trade Log ({visible.length} trades)
+        </h2>
+        <div className="flex gap-1">
+          <button
+            onClick={() => setFilter(f => f === 'live' ? 'all' : 'live')}
+            className={`text-xs px-2.5 py-0.5 rounded-full border transition-colors ${
+              filter === 'live'
+                ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
+                : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300 hover:border-gray-600'
+            }`}
+          >Live</button>
+          <button
+            onClick={() => setFilter(f => f === 'paper' ? 'all' : 'paper')}
+            className={`text-xs px-2.5 py-0.5 rounded-full border transition-colors ${
+              filter === 'paper'
+                ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40'
+                : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300 hover:border-gray-600'
+            }`}
+          >Paper</button>
+          <button
+            onClick={() => setSortDir(d => d === 'desc' ? 'asc' : 'desc')}
+            title="Toggle sort by order time"
+            className="text-xs px-2.5 py-0.5 rounded-full border transition-colors bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600"
+          >{sortDir === 'desc' ? 'Newest first ↓' : 'Oldest first ↑'}</button>
+        </div>
+      </div>
       <div className="rounded-xl border border-gray-800 overflow-x-auto">
         <table className="w-full text-sm whitespace-nowrap">
           <thead>
@@ -306,7 +349,7 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/50">
-            {tradeLog.map((row) => (
+            {visible.map((row) => (
               <tr key={row.num} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
                 <td className="px-3 py-2.5 text-right text-gray-600 tabular-nums">{row.num}</td>
                 <td className="px-3 py-2.5 text-gray-400 tabular-nums">{row.date}</td>
@@ -832,7 +875,8 @@ export default function App() {
       setTradeRows(rows);
       const realLog = buildTradeLogRows(pos, act);
       const merged = [...realLog, ...rawPaper]
-        .sort((a, b) => a.date.localeCompare(b.date))
+        // True chronological order by actual order time; date as tiebreaker.
+        .sort((a, b) => (a.ts - b.ts) || a.date.localeCompare(b.date))
         .map((row, i) => ({ ...row, num: i + 1 }));
       setTradeLog(merged);
       // Fetch live prices for open paper positions and merge in

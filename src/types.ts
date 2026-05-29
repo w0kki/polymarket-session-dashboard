@@ -47,6 +47,7 @@ export interface TradeRow {
 export interface TradeLogRow {
   num: number;           // A
   date: string;          // B
+  ts: number;            // sortable timestamp (unix seconds): live=on-chain buy time, paper=first_seen_at
   market: string;        // C
   sport: string;         // D
   type: string;          // E

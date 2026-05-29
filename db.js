@@ -140,7 +140,9 @@ export function getTrades({ sport, outcome, from, to, limit = 500 } = {}) {
   if (outcome) { sql += ' AND outcome = ?';    params.push(outcome); }
   if (from)    { sql += ' AND date >= ?';      params.push(from); }
   if (to)      { sql += ' AND date <= ?';      params.push(to); }
-  sql += ' ORDER BY date ASC LIMIT ?';
+  // first_seen_at gives true chronological order; date is the match date only
+  // (no time) so it can't disambiguate same-day trades on its own.
+  sql += ' ORDER BY date ASC, first_seen_at ASC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params);
 }
