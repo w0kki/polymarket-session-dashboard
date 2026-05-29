@@ -231,8 +231,19 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
 	}
 
-	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | resp=%v",
-		opp.Sport, truncate(opp.Market, 50), opp.Side, opp.Price*100, opp.SizeUSDC, result)
+	// Only record the trade if the order actually filled.
+	// status:"matched" + non-empty makingAmount = real fill.
+	// status:"delayed" = resting/unfilled order (FAK should cancel, but guard anyway).
+	status, _ := result["status"].(string)
+	makingAmt, _ := result["makingAmount"].(string)
+	filled := status == "matched" && makingAmt != ""
+
+	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | status=%s filled=%v",
+		opp.Sport, truncate(opp.Market, 50), opp.Side, opp.Price*100, opp.SizeUSDC, status, filled)
+
+	if !filled {
+		return fmt.Errorf("live: order not filled (status=%q makingAmount=%q) — no position recorded", status, makingAmt)
+	}
 
 	if l.db != nil {
 		buyFee := kelly.CalcBuyFee(opp.Shares, opp.Price, opp.Sport)
