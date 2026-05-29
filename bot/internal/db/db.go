@@ -175,13 +175,14 @@ func (d *DB) GetTodayPnL() (float64, error) {
 }
 
 // GetConsecutiveLosses returns the number of consecutive LOSS outcomes
-// at the tail of the paper trade history (ordered by updated_at desc).
-// Only paper trades are considered — real trade outcomes should not
-// trigger the paper-bot circuit breaker.
+// at the tail of the live trade history (ordered by updated_at desc).
+// Only live trades (Risk Premia, Latency Arb) are considered — paper trade
+// outcomes should not trigger the live circuit breaker.
 func (d *DB) GetConsecutiveLosses() (int, error) {
 	rows, err := d.conn.Query(`
 		SELECT outcome FROM trades
 		WHERE outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
+		  AND trade_type IN ('Risk Premia', 'Latency Arb')
 		ORDER BY updated_at DESC
 		LIMIT 20
 	`)
