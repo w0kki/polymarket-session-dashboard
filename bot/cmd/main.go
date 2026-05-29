@@ -87,11 +87,12 @@ func main() {
 			cfg.DryRun = true
 			log.Printf("  [mode_override] PAPER mode active (set via Telegram /paper)")
 		}
-		// Re-log the effective mode.
+		// Re-log the effective mode and sync the notifier label.
 		mode = "PAPER"
 		if !cfg.DryRun {
 			mode = "LIVE"
 		}
+		notifier.SetMode(cfg.DryRun)
 		log.Printf("  Effective mode: %s", mode)
 	}
 

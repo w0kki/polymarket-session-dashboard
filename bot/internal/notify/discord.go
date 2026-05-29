@@ -37,6 +37,16 @@ func New(discordWebhookURL, telegramToken, telegramChatID string, dryRun bool) *
 	return n
 }
 
+// SetMode updates the mode label shown in trade notifications.
+// Call this after a mode_override is applied so "PAPER" / "LIVE" is accurate.
+func (n *Notifier) SetMode(dryRun bool) {
+	if dryRun {
+		n.mode = "PAPER"
+	} else {
+		n.mode = "LIVE"
+	}
+}
+
 // Enabled reports whether at least one notification channel is active.
 func (n *Notifier) Enabled() bool {
 	return n.discord != nil || n.telegram != nil
