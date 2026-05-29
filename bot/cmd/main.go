@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,6 +35,16 @@ var (
 	orderFailMu       sync.Mutex
 	orderFailAt       = map[string]time.Time{}
 	orderFailCooldown = 5 * time.Minute
+)
+
+// placedThisSession tracks every conditionID the bot has submitted an order for
+// during this process lifetime. It guarantees at-most-one order attempt per
+// market per session — the in-memory guard that prevents the multi-fill bug
+// (the bot re-firing every poll while a "delayed" order settles). Cross-session
+// dedup is handled by IsAlreadyTraded against the synced DB.
+var (
+	placedMu sync.Mutex
+	placed   = map[string]bool{}
 )
 
 func main() {
@@ -365,6 +376,15 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 			continue
 		}
 
+		// Session-level dedup: never attempt the same market twice in one process
+		// lifetime (guards against re-firing while a "delayed" order settles).
+		placedMu.Lock()
+		alreadyPlaced := placed[entry.ConditionID]
+		placedMu.Unlock()
+		if alreadyPlaced {
+			continue
+		}
+
 		opp, err := scanner.PollOpportunity(entry, sizer)
 		if err != nil {
 			// Log quietly — poll errors are expected for closed/expired markets.
@@ -397,11 +417,21 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				gameID, ls.Period, ls.Score, cfg.TennisMinSet)
 		}
 
-		// Price qualifies — execute.
+		// Price qualifies — execute. Mark the market as placed BEFORE firing so a
+		// concurrent/next poll can't double-submit while the fill is confirmed.
 		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f",
 			opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC)
+		placedMu.Lock()
+		placed[opp.ConditionID] = true
+		placedMu.Unlock()
 
 		if err := exec.PlaceOrder(ctx, *opp); err != nil {
+			// Order accepted by the CLOB but no on-chain fill confirmed — keep it
+			// deduped (already marked placed), record nothing, don't alert.
+			if errors.Is(err, executor.ErrOrderUnconfirmed) {
+				log.Printf("[poll] order unconfirmed for %s (%s) — no fill on-chain, skipping", opp.ConditionID[:12], opp.Side)
+				continue
+			}
 			log.Printf("[poll] order failed for %s: %v", opp.ConditionID[:12], err)
 
 			errStr := err.Error()

@@ -28,6 +28,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -241,14 +242,12 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
 	}
 
-	// A BUY accepted by the CLOB must be recorded immediately so dedup prevents
-	// re-submission on the next poll. Our buy takerAmount is computed at the
-	// sport price ceiling, so the order is always crossable within range — both
-	// status:"matched" (filled synchronously) and status:"delayed" (filled via
-	// the delayed-execution path) represent a real fill. Treating "delayed" as a
-	// failure previously caused the bot to re-fire every poll and accumulate
-	// multiple fills on-chain (e.g. 3×$150 = $450). Only a non-success response
-	// (success:false / error / non-2xx) means the order did not enter the book.
+	// The CLOB accepts our POLY_1271 buys with status:"delayed" (the norm for
+	// the deposit-wallet flow) or occasionally "matched". Neither guarantees an
+	// actual fill: a "delayed" order fills only if it crosses available liquidity.
+	// We therefore CONFIRM the fill on-chain before recording — otherwise an
+	// accepted-but-unfilled order would create a phantom position in the DB
+	// (and a misleading "TRADE PLACED" alert) for a trade that never happened.
 	status, _ := result["status"].(string)
 	success, _ := result["success"].(bool)
 	errMsg, _ := result["errorMsg"].(string)
@@ -257,7 +256,14 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: order not accepted (success=%v status=%q err=%q) — not recorded", success, status, errMsg)
 	}
 
-	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | status=%s",
+	// Confirm the position actually appeared on-chain. If it doesn't within the
+	// confirmation window, return ErrOrderUnconfirmed: the caller keeps the
+	// market deduped (so we don't re-fire) but records nothing and stays quiet.
+	if !l.confirmFill(ctx, opp.ConditionID) {
+		return fmt.Errorf("%w (status=%q)", ErrOrderUnconfirmed, status)
+	}
+
+	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | status=%s filled=confirmed",
 		opp.Sport, truncate(opp.Market, 50), opp.Side, opp.Price*100, opp.SizeUSDC, status)
 
 	if l.db != nil {
@@ -278,6 +284,47 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 	}
 
 	return nil
+}
+
+// ErrOrderUnconfirmed signals the CLOB accepted the order but no on-chain fill
+// was observed within the confirmation window. The order was NOT recorded; the
+// caller should keep the market deduped (avoid re-firing) but not alert.
+var ErrOrderUnconfirmed = errors.New("order accepted but fill not confirmed on-chain")
+
+// confirmFill polls the deposit wallet's on-chain positions for the given
+// market and returns true once a position with size > 0 appears. This is the
+// authoritative signal that a "delayed" order actually executed.
+func (l *LiveExecutor) confirmFill(ctx context.Context, conditionID string) bool {
+	url := "https://data-api.polymarket.com/positions?user=" + l.proxyWallet
+	for attempt := 0; attempt < 5; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second): // let the fill settle on-chain
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := l.client.Do(req)
+		if err != nil {
+			continue
+		}
+		var positions []struct {
+			ConditionID string  `json:"conditionId"`
+			Size        float64 `json:"size"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&positions)
+		resp.Body.Close()
+
+		for _, p := range positions {
+			if strings.EqualFold(p.ConditionID, conditionID) && p.Size > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // VerifyCredentials calls GET /auth/api-keys to confirm the L2 credentials are valid.
