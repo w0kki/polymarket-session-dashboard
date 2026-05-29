@@ -384,14 +384,16 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 
 			errStr := err.Error()
 
-			// order_version_mismatch means the market closed between the last
-			// discovery scan and now (CLOB still reports accepting_orders=true but
-			// rejects orders). Evict the market from the in-memory watchlist so we
-			// don't spam retries every 10 s; it will be excluded on the next full
-			// discovery scan when the CLOB marks it closed.
-			if strings.Contains(errStr, "order_version_mismatch") {
+			// Evict markets that produce unrecoverable errors so we don't spam
+			// retries every 10 s until the next full discovery scan.
+			//   order_version_mismatch — market closed between scan and now.
+			//   order not filled       — FAK returned status:delayed meaning no
+			//                           liquidity at this price right now; retrying
+			//                           every 10 s won't help.
+			if strings.Contains(errStr, "order_version_mismatch") ||
+				strings.Contains(errStr, "order not filled") {
 				evictFromWatchlist(opp.ConditionID)
-				log.Printf("[poll] evicted closed market %s from watchlist (order_version_mismatch)", opp.ConditionID[:12])
+				log.Printf("[poll] evicted %s from watchlist (%s)", opp.ConditionID[:12], errStr[:40])
 				continue
 			}
 
