@@ -241,19 +241,24 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
 	}
 
-	// Only record the trade if the order actually filled.
-	// status:"matched" + non-empty makingAmount = real fill.
-	// status:"delayed" = resting/unfilled order (FAK should cancel, but guard anyway).
+	// A BUY accepted by the CLOB must be recorded immediately so dedup prevents
+	// re-submission on the next poll. Our buy takerAmount is computed at the
+	// sport price ceiling, so the order is always crossable within range — both
+	// status:"matched" (filled synchronously) and status:"delayed" (filled via
+	// the delayed-execution path) represent a real fill. Treating "delayed" as a
+	// failure previously caused the bot to re-fire every poll and accumulate
+	// multiple fills on-chain (e.g. 3×$150 = $450). Only a non-success response
+	// (success:false / error / non-2xx) means the order did not enter the book.
 	status, _ := result["status"].(string)
-	makingAmt, _ := result["makingAmount"].(string)
-	filled := status == "matched" && makingAmt != ""
+	success, _ := result["success"].(bool)
+	errMsg, _ := result["errorMsg"].(string)
 
-	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | status=%s filled=%v",
-		opp.Sport, truncate(opp.Market, 50), opp.Side, opp.Price*100, opp.SizeUSDC, status, filled)
-
-	if !filled {
-		return fmt.Errorf("live: order not filled (status=%q makingAmount=%q) — no position recorded", status, makingAmt)
+	if !success || (status != "matched" && status != "delayed") {
+		return fmt.Errorf("live: order not accepted (success=%v status=%q err=%q) — not recorded", success, status, errMsg)
 	}
+
+	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | status=%s",
+		opp.Sport, truncate(opp.Market, 50), opp.Side, opp.Price*100, opp.SizeUSDC, status)
 
 	if l.db != nil {
 		buyFee := kelly.CalcBuyFee(opp.Shares, opp.Price, opp.Sport)
