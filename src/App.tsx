@@ -778,7 +778,7 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
       {/* Running P&L */}
       <section className="animate-fade-in">
         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
-          Running P&L by Trade
+          Running P&L by Trade <span className="text-gray-600 normal-case">(last 100 trades)</span>
         </h2>
         <div className="rounded-xl border border-gray-800 overflow-hidden">
           <table className="w-full text-sm">
@@ -796,7 +796,8 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800/50">
-              {tradeRows.map((row) => (
+              {/* Last 100 trades, newest first; row.index keeps the chronological number. */}
+              {tradeRows.slice(-100).reverse().map((row) => (
                 <tr key={row.index} className="bg-gray-950 hover:bg-gray-900/50 transition-colors">
                   <td className="px-4 py-3 text-gray-600 tabular-nums">{row.index}</td>
                   <td className="px-4 py-3">
