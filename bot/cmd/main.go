@@ -564,11 +564,18 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalan
 		)
 	}
 
+	// Same-day safety override (set by /startup) bypasses the soft halts — the
+	// circuit breaker and daily loss limit — until midnight UTC. The bankroll
+	// floor above is NOT overridden.
+	today := time.Now().UTC().Format("2006-01-02")
+	overrideDate, _ := database.GetSetting("safety_override")
+	safetyOverride := overrideDate == today
+
 	// 2. Circuit breaker — check if one is already active.
 	expiry, err := database.GetSetting("circuit_breaker_until")
 	if err != nil {
 		log.Printf("[safety] circuit breaker read error: %v", err)
-	} else if expiry != "" {
+	} else if expiry != "" && !safetyOverride {
 		t, err := time.Parse(time.RFC3339, expiry)
 		if err == nil && time.Now().UTC().Before(t) {
 			log.Printf("[safety] ⏸ CIRCUIT BREAKER ACTIVE until %s UTC", t.Format("2006-01-02 15:04"))
@@ -581,11 +588,11 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalan
 		}
 	}
 
-	// Trip a new circuit breaker if needed.
+	// Trip a new circuit breaker if needed (unless overridden via /startup).
 	consec, err := database.GetConsecutiveLosses()
 	if err != nil {
 		log.Printf("[safety] consecutive loss check error: %v", err)
-	} else if consec >= cfg.ConsecLossLimit {
+	} else if consec >= cfg.ConsecLossLimit && !safetyOverride {
 		until := time.Now().UTC().Add(24 * time.Hour)
 		if err := database.SetSetting("circuit_breaker_until", until.Format(time.RFC3339)); err != nil {
 			log.Printf("[safety] failed to set circuit breaker: %v", err)
@@ -603,8 +610,7 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalan
 	dailyPnL, err := database.GetTodayPnL()
 	if err != nil {
 		log.Printf("[safety] daily P&L check error: %v", err)
-	} else if dailyPnL < -cfg.MaxDailyLoss {
-		today := time.Now().UTC().Format("2006-01-02")
+	} else if dailyPnL < -cfg.MaxDailyLoss && !safetyOverride {
 		haltDate, _ := database.GetSetting("daily_loss_halt")
 		if haltDate != today {
 			_ = database.SetSetting("daily_loss_halt", today)
@@ -910,10 +916,14 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			balance := bankroll + livePnLSince
 			stopDrop := effectiveStopLoss(cfg, database)
 
-			// Trading-halt status: surface the daily-loss-limit halt, which is a
-			// separate mechanism from the circuit breaker.
+			// Trading-halt status: surface the daily-loss-limit halt and the
+			// /startup safety override, which are separate from the circuit breaker.
+			today := time.Now().UTC().Format("2006-01-02")
+			overrideDate, _ := database.GetSetting("safety_override")
 			tradingMsg := "active"
-			if breaker != "" {
+			if overrideDate == today {
+				tradingMsg = "active (safety override until midnight UTC)"
+			} else if breaker != "" {
 				tradingMsg = "HALTED (circuit breaker)"
 			} else if todayPnL < -cfg.MaxDailyLoss {
 				tradingMsg = fmt.Sprintf("HALTED (daily loss limit -$%.0f) — resumes midnight UTC", cfg.MaxDailyLoss)
@@ -1009,14 +1019,20 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			selfSignal()
 
 		case "startup":
-			// Clear the killed flag and restart — bot will re-enter main() and
-			// skip the halted branch, resuming normal trading.
-			if err := database.SetSetting("bot_killed", ""); err != nil {
-				n.Broadcast("❌ Failed to clear kill switch: " + err.Error())
-				return
-			}
-			n.Broadcast("🟢 Kill switch cleared — resuming trading now...")
-			log.Println("[cmd] startup requested via Telegram — clearing halted mode")
+			// Resume trading: clear the kill switch and circuit breaker, and set a
+			// same-day safety override so the circuit breaker and daily loss limit
+			// don't immediately re-engage on the existing loss streak / P&L. The
+			// override (and the daily loss halt) reset at midnight UTC. The bankroll
+			// floor is NOT overridden — it remains a hard stop.
+			today := time.Now().UTC().Format("2006-01-02")
+			_ = database.SetSetting("bot_killed", "")
+			_ = database.SetSetting("circuit_breaker_until", "")
+			_ = database.SetSetting("daily_loss_halt", "")
+			_ = database.SetSetting("safety_override", today)
+			n.Broadcast(
+				"🟢 Trading resumed — kill switch, circuit breaker, and daily loss halt cleared.\n" +
+					"⚠️ Circuit breaker and daily loss limit are OVERRIDDEN until midnight UTC. Bankroll floor still applies.")
+			log.Println("[cmd] startup — cleared kill switch + circuit breaker + daily-loss halt; safety override until midnight UTC")
 			selfSignal()
 
 		case "stop":
