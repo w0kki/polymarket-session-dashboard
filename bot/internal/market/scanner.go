@@ -347,8 +347,12 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 	if s.minVolume > 0 {
 		vol, err := s.fetchVolume(entry.ConditionID)
 		if err != nil {
-			log.Printf("[scanner] volume check error for %s: %v — allowing trade", entry.ConditionID[:12], err)
-		} else if vol < s.minVolume {
+			// Fail CLOSED: if we can't verify volume we skip rather than risk a
+			// low-volume entry. The opportunity is re-checked on the next poll.
+			log.Printf("[scanner] volume check error for %s: %v — skipping (fail-closed)", entry.ConditionID[:12], err)
+			return nil, nil
+		}
+		if vol < s.minVolume {
 			log.Printf("[scanner] skip %s — volume $%.0f below $%.0f threshold", entry.ConditionID[:12], vol, s.minVolume)
 			return nil, nil
 		}
@@ -403,7 +407,12 @@ func (s *Scanner) GetNegRisk(tokenID string) (bool, error) {
 // market. Only called when a market's price has already qualified, so the
 // extra HTTP round-trip only occurs on genuine trade candidates.
 func (s *Scanner) fetchVolume(conditionID string) (float64, error) {
-	url := fmt.Sprintf("https://gamma-api.polymarket.com/markets?conditionId=%s", conditionID)
+	// IMPORTANT: the filter param is condition_ids (snake_case, plural). The
+	// camelCase conditionId is silently IGNORED by gamma — it returns a default
+	// page of ~20 unrelated markets, so markets[0].volumeNum was the volume of
+	// some random high-volume market (~$778K), making the volume floor pass for
+	// every market. condition_ids returns exactly the one matching market.
+	url := fmt.Sprintf("https://gamma-api.polymarket.com/markets?condition_ids=%s", conditionID)
 	resp, err := s.client.Get(url)
 	if err != nil {
 		return 0, fmt.Errorf("gamma API: %w", err)
@@ -420,7 +429,12 @@ func (s *Scanner) fetchVolume(conditionID string) (float64, error) {
 		return 0, fmt.Errorf("decode gamma response: %w", err)
 	}
 	if len(markets) == 0 {
-		return 0, nil
+		return 0, nil // market not found → treat as zero volume (skips on the floor)
+	}
+	// Guard: the correct param returns exactly one market. If we somehow get a
+	// page back, the filter wasn't honored — don't trust markets[0].
+	if len(markets) > 1 {
+		return 0, fmt.Errorf("gamma returned %d markets for one conditionId — filter not honored", len(markets))
 	}
 	return markets[0].VolumeNum, nil
 }
