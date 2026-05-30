@@ -597,14 +597,23 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalan
 		return true
 	}
 
-	// 3. Daily loss limit.
+	// 3. Daily loss limit. Halt trading for the rest of the UTC day, but only
+	// ALERT once — the check runs every poll, so without a guard it spams the
+	// notification continuously. daily_loss_halt stores the date it was tripped.
 	dailyPnL, err := database.GetTodayPnL()
 	if err != nil {
 		log.Printf("[safety] daily P&L check error: %v", err)
 	} else if dailyPnL < -cfg.MaxDailyLoss {
-		log.Printf("[safety] 🚨 DAILY LOSS LIMIT HIT — today P&L: $%.2f (limit: -$%.2f)",
-			dailyPnL, cfg.MaxDailyLoss)
-		n.DailyLossLimit(dailyPnL, cfg.MaxDailyLoss)
+		today := time.Now().UTC().Format("2006-01-02")
+		haltDate, _ := database.GetSetting("daily_loss_halt")
+		if haltDate != today {
+			_ = database.SetSetting("daily_loss_halt", today)
+			log.Printf("[safety] 🚨 DAILY LOSS LIMIT HIT — today P&L: $%.2f (limit: -$%.2f) — halting until midnight UTC",
+				dailyPnL, cfg.MaxDailyLoss)
+			n.DailyLossLimit(dailyPnL, cfg.MaxDailyLoss)
+		} else {
+			log.Printf("[safety] ⏸ daily loss limit active (P&L $%.2f) — trading halted until midnight UTC", dailyPnL)
+		}
 		return true
 	}
 
