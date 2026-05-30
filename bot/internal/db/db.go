@@ -218,9 +218,13 @@ func (d *DB) GetSetting(key string) (string, error) {
 
 // SetSetting upserts a key-value pair in the settings table.
 func (d *DB) SetSetting(key, value string) error {
+	// Update updated_at too: GetBankroll uses the bankroll row's timestamp as
+	// the "since" baseline for the balance calc, so re-setting the bankroll must
+	// re-baseline the date (otherwise prior P&L is double-counted and the
+	// balance never resets to the new figure). Harmless for other keys.
 	_, err := d.conn.Exec(`
 		INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
 	`, key, value)
 	return err
 }
