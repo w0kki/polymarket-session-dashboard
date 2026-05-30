@@ -277,7 +277,12 @@ export function buildTradeRows(positions: Position[], activity: Activity[]): Tra
     } else if (posMap[b.conditionId]) {
       const pos = posMap[b.conditionId];
       pnl = pos.cashPnl;
-      status = pos.curPrice >= 0.998 ? 'WIN' : 'ACTIVE';
+      // A still-held position can be resolved: curPrice→1 (won) or →0 (lost).
+      // Without the LOSS branch a settled loser (curPrice 0, redeemable) was
+      // shown as ACTIVE with a big negative P&L.
+      if (pos.curPrice >= 0.998) status = 'WIN';
+      else if (pos.curPrice <= 0.001) status = 'LOSS';
+      else status = 'ACTIVE';
     } else if (soldMap[b.conditionId] !== undefined) {
       pnl = soldMap[b.conditionId] - cost;
       status = pnl >= 0 ? 'WIN' : 'SOLD';
