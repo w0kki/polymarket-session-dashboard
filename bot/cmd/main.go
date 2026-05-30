@@ -909,22 +909,34 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			livePnLSince, _ := database.GetLivePnLSince(since)
 			balance := bankroll + livePnLSince
 			stopDrop := effectiveStopLoss(cfg, database)
+
+			// Trading-halt status: surface the daily-loss-limit halt, which is a
+			// separate mechanism from the circuit breaker.
+			tradingMsg := "active"
+			if breaker != "" {
+				tradingMsg = "HALTED (circuit breaker)"
+			} else if todayPnL < -cfg.MaxDailyLoss {
+				tradingMsg = fmt.Sprintf("HALTED (daily loss limit -$%.0f) — resumes midnight UTC", cfg.MaxDailyLoss)
+			}
+
 			n.Broadcast(fmt.Sprintf(
 				"📊 BOT STATUS\n"+
 					"Mode: %s (override: %s)\n"+
+					"Trading: %s\n"+
 					"Circuit breaker: %s\n"+
 					"Stop-loss: %.0f¢ drop\n"+
 					"Open paper trades: %d\n"+
 					"Open live trades: %d\n"+
-					"Today P&L: $%.2f\n"+
+					"Today P&L: $%.2f (daily limit -$%.0f)\n"+
 					"All-time P&L: $%.2f\n"+
 					"Bankroll: $%.2f | Balance: $%.2f",
 				mode, override,
+				tradingMsg,
 				breakerMsg,
 				stopDrop*100,
 				len(paperTrades),
 				len(liveTrades),
-				todayPnL,
+				todayPnL, cfg.MaxDailyLoss,
 				allPnL,
 				bankroll, balance,
 			))
