@@ -417,6 +417,28 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				gameID, ls.Period, ls.Score, cfg.TennisMinSet)
 		}
 
+		// Baseball game-stage gate: only enter once the game is late (≥ min
+		// inning) or already a blowout (run diff ≥ threshold).
+		if opp.Sport == "Baseball" && (cfg.BaseballMinInning > 0 || cfg.BaseballRunDiff > 0) {
+			gameID, ok := scanner.ResolveGameID(opp.Slug)
+			if !ok {
+				log.Printf("[poll] baseball gate: no gameId for %s — skipping", opp.Slug)
+				continue
+			}
+			ls, _ := database.GetLiveSport(gameID)
+			if ls == nil || !ls.Live {
+				log.Printf("[poll] baseball gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
+				continue
+			}
+			if !market.BaseballStageOK(ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff) {
+				log.Printf("[poll] baseball gate: game %d in %q (score %q) — below inning %d / run-diff %d, skipping %s",
+					gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff, opp.Side)
+				continue
+			}
+			log.Printf("[poll] baseball gate: ✓ game %d in %q (score %q) — inning≥%d or runDiff≥%d OK",
+				gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff)
+		}
+
 		// Price qualifies — execute. Mark the market as placed BEFORE firing so a
 		// concurrent/next poll can't double-submit while the fill is confirmed.
 		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f",
@@ -680,7 +702,7 @@ func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB,
 	}
 
 	// Place actual SELL on the CLOB before updating the DB.
-	if err := liveExec.PlaceSellOrder(ctx, tokenID, t.Side, t.Shares, price, negRisk); err != nil {
+	if err := liveExec.PlaceSellOrder(ctx, t.ConditionID, tokenID, t.Side, t.Shares, price, negRisk); err != nil {
 		log.Printf("[stoploss/live] CLOB sell failed %s: %v", t.ConditionID[:12], err)
 		return // don't update DB if the sell didn't go through
 	}

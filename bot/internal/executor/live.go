@@ -358,15 +358,16 @@ const sellSlippage = 0.15
 
 // PlaceSellOrder places a FAK SELL order on the CLOB to exit a live position.
 // stopPrice is the current quoted price at which the stop triggered.
-func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string, shares, stopPrice float64, negRisk bool) error {
-	// makerAmount: tokens we give up — 4 decimal place precision (÷100).
-	makerAmt := (int64(shares*1e6+0.5) / 100) * 100
-
-	// takerAmount: minimum USDC we'll accept. Discount by sellSlippage so the
-	// order crosses the spread and fills against the best available bid rather
-	// than resting unfilled at the quoted price.
+// conditionID is used to confirm the exit on-chain (the position disappearing).
+func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, conditionID, tokenID, side string, shares, stopPrice float64, negRisk bool) error {
+	// CLOB precision is fixed by field, not by side: makerAmount ≤ 2 decimals
+	// (÷10000 µ-units), takerAmount ≤ 4 decimals (÷100 µ-units) — same as the
+	// working BUY path. makerAmount is the tokens we give up; takerAmount is the
+	// minimum USDC we'll accept (discounted by sellSlippage so the order crosses
+	// the spread and fills against the best bid rather than resting unfilled).
+	makerAmt := (int64(shares*1e6+0.5) / 10000) * 10000
 	minPrice := stopPrice * (1 - sellSlippage)
-	takerAmt := (int64(shares*minPrice*1e6+0.5) / 10000) * 10000
+	takerAmt := (int64(shares*minPrice*1e6+0.5) / 100) * 100
 
 	tokenIDBig := new(big.Int)
 	if _, ok := tokenIDBig.SetString(tokenID, 10); !ok {
@@ -451,22 +452,66 @@ func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, tokenID, side string,
 	var result map[string]interface{}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 
+	// A SELL is confirmed by the position DISAPPEARING on-chain — not by the
+	// immediate response. Our POLY_1271 sells usually return status:delayed (and
+	// fill asynchronously); a retry can also be rejected with "not enough
+	// balance" precisely because the prior delayed order already sold the tokens.
+	// In all of these cases the exit succeeded, so confirm on-chain before
+	// deciding. Only if the position is still held do we treat it as unfilled.
+	if l.confirmExit(ctx, conditionID) {
+		status, _ := result["status"].(string)
+		log.Printf("[LIVE] ⛔ SELL exit confirmed | %s @ %.1f¢ | %.2f shares | status=%s",
+			side, stopPrice*100, shares, status)
+		return nil
+	}
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("live sell: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
+		return fmt.Errorf("live sell: CLOB rejected order (HTTP %d) and position still held: %v", resp.StatusCode, result)
 	}
-
-	// Verify the sell order actually filled — same check as PlaceOrder.
-	// A status:delayed sell means the position is still open; return an error
-	// so the DB is NOT updated to STOP_LOSS and the bot retries next poll.
 	status, _ := result["status"].(string)
-	makingAmt, _ := result["makingAmount"].(string)
-	if status != "matched" || makingAmt == "" {
-		return fmt.Errorf("live sell: order not filled (status=%q makingAmount=%q) — position still open", status, makingAmt)
-	}
+	return fmt.Errorf("live sell: not filled (status=%q) — position still open", status)
+}
 
-	log.Printf("[LIVE] ⛔ SELL stop-loss | %s @ %.1f¢ | %.2f shares | status=%s",
-		side, stopPrice*100, shares, status)
-	return nil
+// confirmExit polls the deposit wallet's on-chain positions and returns true
+// once the position for conditionID is gone (or dust, <1 token). This is the
+// authoritative signal that a SELL executed — used because POLY_1271 sells
+// usually report status:delayed and fill asynchronously.
+func (l *LiveExecutor) confirmExit(ctx context.Context, conditionID string) bool {
+	url := "https://data-api.polymarket.com/positions?user=" + l.proxyWallet
+	for attempt := 0; attempt < 5; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := l.client.Do(req)
+		if err != nil {
+			continue
+		}
+		var positions []struct {
+			ConditionID string  `json:"conditionId"`
+			Size        float64 `json:"size"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&positions)
+		resp.Body.Close()
+
+		held := 0.0
+		for _, p := range positions {
+			if strings.EqualFold(p.ConditionID, conditionID) {
+				held = p.Size
+				break
+			}
+		}
+		if held < 1.0 { // position gone or dust → exit confirmed
+			return true
+		}
+	}
+	return false
 }
 
 // ── EIP-712 / ERC-7739 signing ────────────────────────────────────────────────

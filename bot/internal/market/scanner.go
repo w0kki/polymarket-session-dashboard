@@ -224,6 +224,65 @@ func TennisSetStageOK(period, score string, minSet int) bool {
 	return false
 }
 
+// inningNum parses the inning number from a baseball period string such as
+// "Top 6th", "Mid 6th", "Bot 4th". Returns 0 if no number is found.
+func inningNum(period string) int {
+	n := 0
+	found := false
+	for _, r := range period {
+		if r >= '0' && r <= '9' {
+			n = n*10 + int(r-'0')
+			found = true
+		} else if found {
+			break // digits are contiguous; stop at the first non-digit after them
+		}
+	}
+	if !found {
+		return 0
+	}
+	return n
+}
+
+// runDiff parses the absolute run differential from a baseball score string
+// such as "8-3" → 5. Returns 0 if unparseable.
+func runDiff(score string) int {
+	parts := strings.SplitN(strings.TrimSpace(score), "-", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	a, errA := strconv.Atoi(strings.TrimSpace(parts[0]))
+	b, errB := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errA != nil || errB != nil {
+		return 0
+	}
+	if a > b {
+		return a - b
+	}
+	return b - a
+}
+
+// BaseballStageOK reports whether a baseball game is far enough along to trade.
+// Allows entry when the game has reached minInning OR the run differential is
+// at least minRunDiff (a blowout, decided early). Either condition being 0
+// disables that arm of the check.
+func BaseballStageOK(period, score string, minInning, minRunDiff int) bool {
+	if minInning <= 0 && minRunDiff <= 0 {
+		return true // gating disabled
+	}
+	inning := inningNum(period)
+	diff := runDiff(score)
+	if inning == 0 && diff == 0 {
+		return false // no usable live state — fail closed
+	}
+	if minInning > 0 && inning >= minInning {
+		return true
+	}
+	if minRunDiff > 0 && diff >= minRunDiff {
+		return true
+	}
+	return false
+}
+
 // WatchlistEntry is a market that passed all non-price filters and is being
 // actively monitored for a qualifying price. Built by BuildWatchlist (slow
 // loop) and polled by PollOpportunity (fast loop).

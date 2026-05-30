@@ -135,6 +135,18 @@ type Config struct {
 	// TENNIS_MIN_SET (default 0)
 	TennisMinSet int
 
+	// Baseball game-stage gate. Live inning + score come from the
+	// sports_collector.py sidecar. A baseball market is only traded when the
+	// game has reached BaseballMinInning OR the run differential is at least
+	// BaseballRunDiff (a blowout, decided early). This avoids early-game
+	// entries where a favorite still has lots of variance left.
+	//   0/0 = disabled
+	//   6/6 = enter from the 6th inning on, or earlier if up by 6+ runs
+	// If enabled and no fresh live state is available, the market is skipped.
+	// BASEBALL_MIN_INNING / BASEBALL_RUN_DIFF (default 0)
+	BaseballMinInning int
+	BaseballRunDiff   int
+
 	// Bankroll floor expressed as a fraction of the current bankroll.
 	// Bot shuts down entirely if balance falls below (bankroll × floor pct).
 	// e.g. 0.30 = stop if balance drops to 30% of starting bankroll (70% loss).
@@ -176,8 +188,10 @@ func Load() *Config {
 		StopLossDrop:    envFloat("STOP_LOSS_DROP", 0.50),
 		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
 		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
-		ConsecLossLimit: envInt("CONSEC_LOSS_LIMIT", 3),
-		TennisMinSet:    envInt("TENNIS_MIN_SET", 0),
+		ConsecLossLimit:   envInt("CONSEC_LOSS_LIMIT", 3),
+		TennisMinSet:      envInt("TENNIS_MIN_SET", 0),
+		BaseballMinInning: envInt("BASEBALL_MIN_INNING", 0),
+		BaseballRunDiff:   envInt("BASEBALL_RUN_DIFF", 0),
 		BankrollFloorPct: envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }
