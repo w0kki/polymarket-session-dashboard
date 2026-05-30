@@ -360,11 +360,22 @@ const sellSlippage = 0.15
 // stopPrice is the current quoted price at which the stop triggered.
 // conditionID is used to confirm the exit on-chain (the position disappearing).
 func (l *LiveExecutor) PlaceSellOrder(ctx context.Context, conditionID, tokenID, side string, shares, stopPrice float64, negRisk bool) error {
+	// Sell the ACTUAL on-chain balance, not the DB-recorded share count. The
+	// real fill differs from the intended price (price improvement/slippage), so
+	// the recorded shares can exceed what we actually hold — selling that amount
+	// is rejected with "not enough balance" and the position never exits. Cap to
+	// the live on-chain size when it's smaller.
+	if onchain, ok := l.positionSize(ctx, conditionID); ok && onchain > 0 && onchain < shares {
+		log.Printf("[live] sell: capping %.4f recorded shares to %.4f on-chain for %s", shares, onchain, side)
+		shares = onchain
+	}
+
 	// CLOB precision is fixed by field, not by side: makerAmount ≤ 2 decimals
 	// (÷10000 µ-units), takerAmount ≤ 4 decimals (÷100 µ-units) — same as the
 	// working BUY path. makerAmount is the tokens we give up; takerAmount is the
 	// minimum USDC we'll accept (discounted by sellSlippage so the order crosses
 	// the spread and fills against the best bid rather than resting unfilled).
+	// Integer division rounds DOWN, so makerAmt never exceeds the held balance.
 	makerAmt := (int64(shares*1e6+0.5) / 10000) * 10000
 	minPrice := stopPrice * (1 - sellSlippage)
 	takerAmt := (int64(shares*minPrice*1e6+0.5) / 100) * 100
@@ -512,6 +523,35 @@ func (l *LiveExecutor) confirmExit(ctx context.Context, conditionID string) bool
 		}
 	}
 	return false
+}
+
+// positionSize returns the deposit wallet's current on-chain token balance for
+// a market (in whole tokens). The bool is false on request/parse failure so the
+// caller can fall back to its recorded share count.
+func (l *LiveExecutor) positionSize(ctx context.Context, conditionID string) (float64, bool) {
+	url := "https://data-api.polymarket.com/positions?user=" + l.proxyWallet
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return 0, false
+	}
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	var positions []struct {
+		ConditionID string  `json:"conditionId"`
+		Size        float64 `json:"size"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&positions); err != nil {
+		return 0, false
+	}
+	for _, p := range positions {
+		if strings.EqualFold(p.ConditionID, conditionID) {
+			return p.Size, true
+		}
+	}
+	return 0, true // no position found → genuinely zero
 }
 
 // ── EIP-712 / ERC-7739 signing ────────────────────────────────────────────────
