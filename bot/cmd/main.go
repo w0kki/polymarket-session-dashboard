@@ -461,6 +461,28 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				gameID, ls.Period, ls.Score, cfg.HockeyMinPeriod, cfg.HockeyGoalDiff)
 		}
 
+		// Basketball game-stage gate (NBA + WNBA): only enter from the min
+		// quarter on, or once the point differential reaches the blowout margin.
+		if opp.Sport == "Basketball" && (cfg.BasketballMinQuarter > 0 || cfg.BasketballPointDiff > 0) {
+			gameID, ok := scanner.ResolveGameID(opp.Slug)
+			if !ok {
+				log.Printf("[poll] basketball gate: no gameId for %s — skipping", opp.Slug)
+				continue
+			}
+			ls, _ := database.GetLiveSport(gameID)
+			if ls == nil || !ls.Live {
+				log.Printf("[poll] basketball gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
+				continue
+			}
+			if !market.GameStageOK(ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff) {
+				log.Printf("[poll] basketball gate: game %d in %q (score %q) — below quarter %d / point-diff %d, skipping %s",
+					gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff, opp.Side)
+				continue
+			}
+			log.Printf("[poll] basketball gate: ✓ game %d in %q (score %q) — quarter≥%d or pointDiff≥%d OK",
+				gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff)
+		}
+
 		// Price qualifies — execute. Mark the market as placed BEFORE firing so a
 		// concurrent/next poll can't double-submit while the fill is confirmed.
 		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f",

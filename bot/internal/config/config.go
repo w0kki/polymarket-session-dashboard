@@ -156,6 +156,15 @@ type Config struct {
 	HockeyMinPeriod int
 	HockeyGoalDiff  int
 
+	// Basketball game-stage gate (NBA + WNBA). Enter only when the game has
+	// reached BasketballMinQuarter OR the point differential is at least
+	// BasketballPointDiff.
+	//   0/0 = disabled
+	//   4/25 = enter in the 4th quarter, or earlier if up by 25+ points
+	// BASKETBALL_MIN_QUARTER / BASKETBALL_POINT_DIFF (default 0)
+	BasketballMinQuarter int
+	BasketballPointDiff  int
+
 	// Bankroll floor expressed as a fraction of the current bankroll.
 	// Bot shuts down entirely if balance falls below (bankroll × floor pct).
 	// e.g. 0.30 = stop if balance drops to 30% of starting bankroll (70% loss).
@@ -201,8 +210,10 @@ func Load() *Config {
 		TennisMinSet:      envInt("TENNIS_MIN_SET", 0),
 		BaseballMinInning: envInt("BASEBALL_MIN_INNING", 0),
 		BaseballRunDiff:   envInt("BASEBALL_RUN_DIFF", 0),
-		HockeyMinPeriod:   envInt("HOCKEY_MIN_PERIOD", 0),
-		HockeyGoalDiff:    envInt("HOCKEY_GOAL_DIFF", 0),
+		HockeyMinPeriod:      envInt("HOCKEY_MIN_PERIOD", 0),
+		HockeyGoalDiff:       envInt("HOCKEY_GOAL_DIFF", 0),
+		BasketballMinQuarter: envInt("BASKETBALL_MIN_QUARTER", 0),
+		BasketballPointDiff:  envInt("BASKETBALL_POINT_DIFF", 0),
 		BankrollFloorPct: envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }

@@ -26,7 +26,7 @@ var slugSports = map[string]string{
 	"ucl": "Soccer", "uel": "Soccer", "wc": "Soccer", "afc": "Soccer",
 	"csl": "Soccer", "ksl": "Soccer", "jsl": "Soccer", "asl": "Soccer",
 	"mlb": "Baseball",
-	"nba": "Basketball",
+	"nba": "Basketball", "wnba": "Basketball",
 	"nfl": "Football",
 	"nhl": "Hockey",
 	"atp": "Tennis", "wta": "Tennis",
