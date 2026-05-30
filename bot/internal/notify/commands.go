@@ -50,6 +50,14 @@ func (t *telegramChannel) pollCommands(ctx context.Context, handler CommandHandl
 	client := &http.Client{Timeout: 35 * time.Second}
 	offset := 0
 
+	// Drain any backlog on startup WITHOUT processing it. Otherwise a restart
+	// re-fetches old un-acknowledged commands (offset resets to 0) and replays
+	// them — and a queued /startup would re-trigger a restart, looping forever.
+	if _, lastID, err := t.getUpdates(ctx, client, -1, 0); err == nil && lastID > 0 {
+		offset = lastID + 1
+		log.Printf("[cmd] drained command backlog on startup (offset → %d)", offset)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -57,7 +65,7 @@ func (t *telegramChannel) pollCommands(ctx context.Context, handler CommandHandl
 		default:
 		}
 
-		updates, lastID, err := t.getUpdates(ctx, client, offset)
+		updates, lastID, err := t.getUpdates(ctx, client, offset, 25)
 		if err != nil {
 			// Context cancelled — exit cleanly.
 			if ctx.Err() != nil {
@@ -104,10 +112,10 @@ func (t *telegramChannel) pollCommands(ctx context.Context, handler CommandHandl
 	}
 }
 
-func (t *telegramChannel) getUpdates(ctx context.Context, client *http.Client, offset int) ([]tgUpdate, int, error) {
+func (t *telegramChannel) getUpdates(ctx context.Context, client *http.Client, offset, timeoutSec int) ([]tgUpdate, int, error) {
 	url := fmt.Sprintf(
-		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=25&allowed_updates=[\"message\"]",
-		t.token, offset,
+		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=%d&allowed_updates=[\"message\"]",
+		t.token, offset, timeoutSec,
 	)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
