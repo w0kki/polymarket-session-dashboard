@@ -322,12 +322,14 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 	}
 
 	// token.price is the last-trade price and lags the live book in fast
-	// markets (e.g. it read 90.5¢ for a favorite whose live ask was 96¢). When
-	// the stale price is anywhere near the band, confirm against the live order
-	// book and use the best ASK — the price we'd actually pay — for the entry
-	// decision. The pre-screen keeps book fetches rare (only near-band markets).
+	// markets — sometimes by 15¢+ (e.g. it read 82.5¢ for a favorite whose live
+	// ask was 98¢, and 90.5¢ for one whose live ask was 96¢). When the stale
+	// price is within a generous window of the band, confirm against the live
+	// order book and use the best ASK — the price we'd actually pay — for the
+	// entry decision. The 20¢ window covers the observed staleness while keeping
+	// book fetches limited to plausible-favorite markets.
 	price := stalePrice
-	if tokenID != "" && stalePrice >= minPrice-0.10 {
+	if tokenID != "" && stalePrice >= minPrice-0.20 {
 		if _, ask, ok := s.fetchBook(tokenID); ok {
 			if (ask >= minPrice && (maxPrice <= 0 || ask <= maxPrice)) && ask != stalePrice {
 				log.Printf("[scanner] %s: live ask %.3f (token.price %.3f stale) — using book", side, ask, stalePrice)
