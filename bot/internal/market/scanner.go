@@ -224,9 +224,10 @@ func TennisSetStageOK(period, score string, minSet int) bool {
 	return false
 }
 
-// inningNum parses the inning number from a baseball period string such as
-// "Top 6th", "Mid 6th", "Bot 4th". Returns 0 if no number is found.
-func inningNum(period string) int {
+// periodInt parses the leading integer from a game period string — the inning
+// for baseball ("Top 6th" → 6) or the period for hockey ("End P1" → 1, "P2" → 2).
+// Returns 0 if no number is found.
+func periodInt(period string) int {
 	n := 0
 	found := false
 	for _, r := range period {
@@ -261,23 +262,23 @@ func runDiff(score string) int {
 	return b - a
 }
 
-// BaseballStageOK reports whether a baseball game is far enough along to trade.
-// Allows entry when the game has reached minInning OR the run differential is
-// at least minRunDiff (a blowout, decided early). Either condition being 0
-// disables that arm of the check.
-func BaseballStageOK(period, score string, minInning, minRunDiff int) bool {
-	if minInning <= 0 && minRunDiff <= 0 {
+// GameStageOK reports whether a period-based game (baseball innings, hockey
+// periods) is far enough along to trade. Allows entry when the game has reached
+// minPeriod OR the score differential is at least minDiff (a blowout, decided
+// early). Either threshold being 0 disables that arm of the check.
+func GameStageOK(period, score string, minPeriod, minDiff int) bool {
+	if minPeriod <= 0 && minDiff <= 0 {
 		return true // gating disabled
 	}
-	inning := inningNum(period)
+	p := periodInt(period)
 	diff := runDiff(score)
-	if inning == 0 && diff == 0 {
+	if p == 0 && diff == 0 {
 		return false // no usable live state — fail closed
 	}
-	if minInning > 0 && inning >= minInning {
+	if minPeriod > 0 && p >= minPeriod {
 		return true
 	}
-	if minRunDiff > 0 && diff >= minRunDiff {
+	if minDiff > 0 && diff >= minDiff {
 		return true
 	}
 	return false

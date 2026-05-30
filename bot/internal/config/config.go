@@ -147,6 +147,15 @@ type Config struct {
 	BaseballMinInning int
 	BaseballRunDiff   int
 
+	// Hockey game-stage gate, same idea as baseball but with periods/goals.
+	// Enter only when the game has reached HockeyMinPeriod OR the goal
+	// differential is at least HockeyGoalDiff.
+	//   0/0 = disabled
+	//   2/5 = enter from the 2nd period on, or earlier if up by 5+ goals
+	// HOCKEY_MIN_PERIOD / HOCKEY_GOAL_DIFF (default 0)
+	HockeyMinPeriod int
+	HockeyGoalDiff  int
+
 	// Bankroll floor expressed as a fraction of the current bankroll.
 	// Bot shuts down entirely if balance falls below (bankroll × floor pct).
 	// e.g. 0.30 = stop if balance drops to 30% of starting bankroll (70% loss).
@@ -192,6 +201,8 @@ func Load() *Config {
 		TennisMinSet:      envInt("TENNIS_MIN_SET", 0),
 		BaseballMinInning: envInt("BASEBALL_MIN_INNING", 0),
 		BaseballRunDiff:   envInt("BASEBALL_RUN_DIFF", 0),
+		HockeyMinPeriod:   envInt("HOCKEY_MIN_PERIOD", 0),
+		HockeyGoalDiff:    envInt("HOCKEY_GOAL_DIFF", 0),
 		BankrollFloorPct: envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }
