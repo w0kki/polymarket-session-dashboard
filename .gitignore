@@ -1,19 +1,66 @@
-node_modules
-dist
-.DS_Store
-*.local
+# ── Node / Dashboard (React + Express + Vite) ─────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Database — never commit trade data
+# ── Go / Bot ──────────────────────────────────────────────────────────────────
+# Compiled binaries (all targets) + backups
+bot/bot
+bot/bot-pi
+bot/bot-vps
+bot/bot-ec2
+bot/bot_bin
+bot/polymarket-bot-linux-*
+*.bak
+
+# Go test & coverage artifacts
+*.test
+*.out
+coverage.html
+
+# ── Python sidecars (sports_collector.py, official_collector.py) ──────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# ── Database (trade data + WAL + backups — never commit) ──────────────────────
 trades.db
 trades.db-shm
 trades.db-wal
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+trades.db.bak*
 
-# Compiled bot binaries
-bot/bot
-bot/bot-pi
-bot/bot_bin
-bot/polymarket-bot-linux-*
-
-# Secrets / env
+# ── Secrets & config (ecosystem holds private keys / API creds / tokens) ──────
 .env
+.env.*
 *.env
+*.local
+*.pem
+*.key
+secrets/
+kcc-settings.json
+bot/ecosystem.config.cjs
+ecosystem.config.cjs
+
+# ── pm2 / process runtime ─────────────────────────────────────────────────────
+.pm2/
+*.pid
+*.log
+logs/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
