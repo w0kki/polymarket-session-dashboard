@@ -105,7 +105,10 @@ function detectSport(slug: string): string {
     epl: 'Soccer', lal: 'Soccer', fl1: 'Soccer', fl2: 'Soccer',
     spl: 'Soccer', mls: 'Soccer', bun: 'Soccer', ser: 'Soccer',
     ucl: 'Soccer', uel: 'Soccer', wc: 'Soccer', afc: 'Soccer',
-    mlb: 'Baseball', nba: 'Basketball', nfl: 'Football',
+    csl: 'Soccer', ksl: 'Soccer', jsl: 'Soccer', asl: 'Soccer',
+    bra: 'Soccer', tur: 'Soccer', nor: 'Soccer', fif: 'Soccer',
+    mlb: 'Baseball', kbo: 'Baseball',
+    nba: 'Basketball', wnba: 'Basketball', nfl: 'Football',
     nhl: 'Hockey', atp: 'Tennis', wta: 'Tennis', ufc: 'MMA',
   };
   return map[prefix] ?? 'Sports';

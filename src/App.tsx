@@ -459,6 +459,20 @@ function TradeLogView({ tradeLog }: { tradeLog: TradeLogRow[] }) {
   );
 }
 
+// currentWinStreak counts consecutive WINs ending at the most recent RESOLVED
+// trade. `outcomes` must be in chronological order (oldest → newest). Open trades
+// (ACTIVE/NA) are skipped (not yet resolved); any loss/stop/sale ends the streak.
+function currentWinStreak(outcomes: string[]): number {
+  let streak = 0;
+  for (let i = outcomes.length - 1; i >= 0; i--) {
+    const o = outcomes[i];
+    if (o === 'ACTIVE' || o === 'NA') continue; // not resolved yet — skip
+    if (o === 'WIN') { streak++; continue; }
+    break; // LOSS / STOP_LOSS / SOLD ends the streak
+  }
+  return streak;
+}
+
 function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
   const resolved  = paperTrades.filter(r => r.outcome === 'WIN' || r.outcome === 'LOSS' || r.outcome === 'STOP_LOSS');
   const open      = paperTrades.filter(r => r.outcome === 'NA');
@@ -473,6 +487,7 @@ function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
   const largestLoss = resolved.filter(r => r.outcome === 'LOSS' || r.outcome === 'STOP_LOSS').reduce((m, r) => Math.min(m, r.netPnl ?? r.pnl ?? 0), 0);
   const avgReturn   = resolved.length > 0 ? totalPnl / resolved.length : 0;
   const avgFee      = paperTrades.length > 0 ? totalFees / paperTrades.length : 0;
+  const winStreak   = currentWinStreak([...resolved].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0)).map(r => r.outcome));
 
   let cumulative = 0;
   const runningRows: TradeRow[] = resolved.map((r, i) => {
@@ -512,9 +527,10 @@ function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
       </div>
 
       {/* KPI Row 2 */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 animate-fade-in">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 animate-fade-in">
         <KpiCard label="Wins"               value={String(wins)}   color="green" />
         <KpiCard label="Losses"             value={String(losses)} color={losses > 0 ? 'red' : 'default'} />
+        <KpiCard label="Win Streak"         value={String(winStreak)} sub="current" color={winStreak > 0 ? 'green' : 'default'} />
         <KpiCard label="Total Fees"         value={fmt$abs(totalFees)} sub={`${fmt$abs(avgFee)} avg/trade`} />
         <KpiCard label="Net P&L (after fees)" value={resolved.length > 0 ? fmt$(netPnl) : '—'} color={netPnl >= 0 ? 'green' : 'red'} />
         <KpiCard label="Avg Return/Trade"   value={resolved.length > 0 ? fmt$(avgReturn) : '—'} color={avgReturn >= 0 ? 'green' : 'red'} />
@@ -654,6 +670,8 @@ function PaperDashboardView({ paperTrades }: { paperTrades: TradeLogRow[] }) {
 }
 
 function DashboardView({ positions, tradeRows, stats }: { positions: Position[]; tradeRows: TradeRow[]; stats: SessionStats }) {
+  // tradeRows are already sorted oldest → newest, so count the streak from the end.
+  const winStreak = currentWinStreak(tradeRows.map(r => r.status));
   return (
     <>
       {/* KPI Row 1 */}
@@ -672,9 +690,10 @@ function DashboardView({ positions, tradeRows, stats }: { positions: Position[];
       </div>
 
       {/* KPI Row 2 */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 animate-fade-in">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 animate-fade-in">
         <KpiCard label="Wins"           value={String(stats.wins)}    color="green" />
         <KpiCard label="Losses"         value={String(stats.losses)}  color={stats.losses > 0 ? 'red' : 'default'} />
+        <KpiCard label="Win Streak"     value={String(winStreak)} sub="current" color={winStreak > 0 ? 'green' : 'default'} />
         <KpiCard label="Total Fees"     value={fmt$abs(stats.totalFees)} sub={`${fmt$abs(stats.avgFeePerTrade)} avg/trade`} />
         <KpiCard
           label="Net P&L (after fees)"
