@@ -23,6 +23,12 @@ type Config struct {
 	// This is the fast loop — single HTTP request per market.
 	PollIntervalSec int
 
+	// How often to check open positions for stop-loss exits (seconds). Runs on
+	// its OWN ticker, decoupled from the entry scan — the entry scan staggers
+	// across all watchlisted markets and can take 30s+, which would otherwise
+	// delay exits. Keep this short so a collapsing favorite is caught quickly.
+	StopLossIntervalSec int
+
 	// Minimum token price to enter a trade (global default across all sports).
 	EntryThreshold float64
 
@@ -56,8 +62,8 @@ type Config struct {
 	// (≈70th minute onward). EndDateISO is used as a proxy for elapsed game time.
 	// SOCCER_MIN_PRICE (default 0.94), SOCCER_MAX_PRICE (default 0.97)
 	// SOCCER_MAX_HOURS_TO_CLOSE (default 0.5 = 30 min remaining ≈ 70th minute)
-	SoccerMinPrice       float64
-	SoccerMaxPrice       float64
+	SoccerMinPrice        float64
+	SoccerMaxPrice        float64
 	SoccerMaxHoursToClose float64
 
 	// Hard cap on position size regardless of Kelly output ($30).
@@ -71,6 +77,12 @@ type Config struct {
 	// Sports the bot is allowed to trade. Comma-separated.
 	// e.g. "Baseball"  or  "Baseball,Soccer"
 	Sports []string
+
+	// When true, tennis doubles are allowed into the watchlist but routed to the
+	// PAPER executor only (never live capital) — to gather data on whether they'd
+	// be profitable under the current settings. Default false (doubles excluded).
+	// PAPER_TRADE_DOUBLES (default false)
+	PaperTradeDoubles bool
 
 	// Minimum time until market close (hours). 0 = trade right up to the wire.
 	MinHoursToClose float64
@@ -112,6 +124,13 @@ type Config struct {
 	// Set to 0 to disable stop losses entirely.
 	// STOP_LOSS_DROP (default 0.50)
 	StopLossDrop float64
+
+	// Per-sport stop-loss overrides. When a sport has an entry here it takes
+	// precedence over StopLossDrop — including 0, which DISABLES the stop for
+	// that sport (hold to settlement). Populated from <SPORT>_STOP_LOSS_DROP env
+	// vars, e.g. TENNIS_STOP_LOSS_DROP=0. Tennis favorites swing wildly and tend
+	// to recover, so the stop there mostly sells eventual winners (whipsaw).
+	StopLossDropBySport map[string]float64
 
 	// ── Safety nets ───────────────────────────────────────────────────────────
 
@@ -175,46 +194,49 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		DryRun:          envBool("DRY_RUN", true),
-		ScanIntervalSec: envInt("SCAN_INTERVAL_SEC", 600),
-		PollIntervalSec: envInt("POLL_INTERVAL_SEC", 10),
-		EntryThreshold:  envFloat("ENTRY_THRESHOLD", 0.94),
-		MaxEntryPrice:   envFloat("MAX_ENTRY_PRICE", 0.97),
-		TennisMinPrice:  envFloat("TENNIS_MIN_PRICE", 0.96),
-		TennisMaxPrice:  envFloat("TENNIS_MAX_PRICE", 0.97),
-		BaseballMinPrice: envFloat("BASEBALL_MIN_PRICE", 0.94),
-		BaseballMaxPrice: envFloat("BASEBALL_MAX_PRICE", 0.955),
-		HockeyMinPrice:   envFloat("HOCKEY_MIN_PRICE", 0.95),
-		HockeyMaxPrice:   envFloat("HOCKEY_MAX_PRICE", 0.97),
-		SoccerMinPrice:       envFloat("SOCCER_MIN_PRICE", 0.94),
-		SoccerMaxPrice:       envFloat("SOCCER_MAX_PRICE", 0.97),
+		DryRun:                envBool("DRY_RUN", true),
+		ScanIntervalSec:       envInt("SCAN_INTERVAL_SEC", 600),
+		PollIntervalSec:       envInt("POLL_INTERVAL_SEC", 10),
+		StopLossIntervalSec:   envInt("STOP_LOSS_INTERVAL_SEC", 3),
+		EntryThreshold:        envFloat("ENTRY_THRESHOLD", 0.94),
+		MaxEntryPrice:         envFloat("MAX_ENTRY_PRICE", 0.97),
+		TennisMinPrice:        envFloat("TENNIS_MIN_PRICE", 0.96),
+		TennisMaxPrice:        envFloat("TENNIS_MAX_PRICE", 0.97),
+		BaseballMinPrice:      envFloat("BASEBALL_MIN_PRICE", 0.94),
+		BaseballMaxPrice:      envFloat("BASEBALL_MAX_PRICE", 0.955),
+		HockeyMinPrice:        envFloat("HOCKEY_MIN_PRICE", 0.95),
+		HockeyMaxPrice:        envFloat("HOCKEY_MAX_PRICE", 0.97),
+		SoccerMinPrice:        envFloat("SOCCER_MIN_PRICE", 0.94),
+		SoccerMaxPrice:        envFloat("SOCCER_MAX_PRICE", 0.97),
 		SoccerMaxHoursToClose: envFloat("SOCCER_MAX_HOURS_TO_CLOSE", 0.5),
-		MaxPositionSize: envFloat("MAX_POSITION_SIZE", 30.0),
-		MinVolume:       envFloat("MIN_VOLUME", 50000.0),
-		Sports:          envStrings("SPORTS", []string{"Baseball", "Tennis"}),
-		MinHoursToClose: envFloat("MIN_HOURS_TO_CLOSE", 0.0),
-		MaxHoursToClose: envFloat("MAX_HOURS_TO_CLOSE", 0.0),
-		DBPath:            envString("DB_PATH", "../trades.db"),
-		DiscordWebhookURL: envString("DISCORD_WEBHOOK_URL", ""),
-		TelegramBotToken:  envString("TELEGRAM_BOT_TOKEN", ""),
-		TelegramChatID:    envString("TELEGRAM_CHAT_ID", ""),
-		PolyPrivateKey:    envString("POLY_PRIVATE_KEY", ""),
-		PolyAPIKey:        envString("POLY_API_KEY", ""),
-		PolyAPISecret:     envString("POLY_API_SECRET", ""),
-		PolyAPIPassphrase: envString("POLY_API_PASSPHRASE", ""),
-		PolyProxyWallet:   envString("POLY_PROXY_WALLET", ""),
-		StopLossDrop:    envFloat("STOP_LOSS_DROP", 0.50),
-		FallbackSize:    envFloat("FALLBACK_SIZE", 10.0),
-		MaxDailyLoss:    envFloat("MAX_DAILY_LOSS", 300.0),
-		ConsecLossLimit:   envInt("CONSEC_LOSS_LIMIT", 3),
-		TennisMinSet:      envInt("TENNIS_MIN_SET", 0),
-		BaseballMinInning: envInt("BASEBALL_MIN_INNING", 0),
-		BaseballRunDiff:   envInt("BASEBALL_RUN_DIFF", 0),
-		HockeyMinPeriod:      envInt("HOCKEY_MIN_PERIOD", 0),
-		HockeyGoalDiff:       envInt("HOCKEY_GOAL_DIFF", 0),
-		BasketballMinQuarter: envInt("BASKETBALL_MIN_QUARTER", 0),
-		BasketballPointDiff:  envInt("BASKETBALL_POINT_DIFF", 0),
-		BankrollFloorPct: envFloat("BANKROLL_FLOOR_PCT", 0.30),
+		MaxPositionSize:       envFloat("MAX_POSITION_SIZE", 30.0),
+		MinVolume:             envFloat("MIN_VOLUME", 50000.0),
+		Sports:                envStrings("SPORTS", []string{"Baseball", "Tennis"}),
+		PaperTradeDoubles:     envBool("PAPER_TRADE_DOUBLES", false),
+		MinHoursToClose:       envFloat("MIN_HOURS_TO_CLOSE", 0.0),
+		MaxHoursToClose:       envFloat("MAX_HOURS_TO_CLOSE", 0.0),
+		DBPath:                envString("DB_PATH", "../trades.db"),
+		DiscordWebhookURL:     envString("DISCORD_WEBHOOK_URL", ""),
+		TelegramBotToken:      envString("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChatID:        envString("TELEGRAM_CHAT_ID", ""),
+		PolyPrivateKey:        envString("POLY_PRIVATE_KEY", ""),
+		PolyAPIKey:            envString("POLY_API_KEY", ""),
+		PolyAPISecret:         envString("POLY_API_SECRET", ""),
+		PolyAPIPassphrase:     envString("POLY_API_PASSPHRASE", ""),
+		PolyProxyWallet:       envString("POLY_PROXY_WALLET", ""),
+		StopLossDrop:          envFloat("STOP_LOSS_DROP", 0.50),
+		StopLossDropBySport:   loadSportStopLosses(),
+		FallbackSize:          envFloat("FALLBACK_SIZE", 10.0),
+		MaxDailyLoss:          envFloat("MAX_DAILY_LOSS", 300.0),
+		ConsecLossLimit:       envInt("CONSEC_LOSS_LIMIT", 3),
+		TennisMinSet:          envInt("TENNIS_MIN_SET", 0),
+		BaseballMinInning:     envInt("BASEBALL_MIN_INNING", 0),
+		BaseballRunDiff:       envInt("BASEBALL_RUN_DIFF", 0),
+		HockeyMinPeriod:       envInt("HOCKEY_MIN_PERIOD", 0),
+		HockeyGoalDiff:        envInt("HOCKEY_GOAL_DIFF", 0),
+		BasketballMinQuarter:  envInt("BASKETBALL_MIN_QUARTER", 0),
+		BasketballPointDiff:   envInt("BASKETBALL_POINT_DIFF", 0),
+		BankrollFloorPct:      envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }
 
@@ -269,4 +291,19 @@ func envStrings(key string, def []string) []string {
 		return def
 	}
 	return strings.Split(v, ",")
+}
+
+// loadSportStopLosses reads per-sport stop-loss overrides from <SPORT>_STOP_LOSS_DROP
+// env vars (e.g. TENNIS_STOP_LOSS_DROP=0). Only sports with the var set are
+// included; a value of 0 means the stop is disabled for that sport.
+func loadSportStopLosses() map[string]float64 {
+	m := map[string]float64{}
+	for _, s := range []string{"Tennis", "Baseball", "Hockey", "Basketball", "Soccer"} {
+		if raw := os.Getenv(strings.ToUpper(s) + "_STOP_LOSS_DROP"); raw != "" {
+			if v, err := strconv.ParseFloat(raw, 64); err == nil && v >= 0 {
+				m[s] = v
+			}
+		}
+	}
+	return m
 }

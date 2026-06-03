@@ -30,9 +30,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -207,7 +209,7 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 			Salt:          salt.Int64(),
 			Side:          "BUY",
 			Signature:     sig,
-			SignatureType: 3, // POLY_1271 — ERC-7739 TypedDataSign
+			SignatureType: 3,             // POLY_1271 — ERC-7739 TypedDataSign
 			Signer:        l.proxyWallet, // deposit wallet is also signer for POLY_1271
 			TakerAmount:   fmt.Sprintf("%d", takerAmt),
 			Timestamp:     fmt.Sprintf("%d", tsMs),
@@ -346,6 +348,87 @@ func (l *LiveExecutor) VerifyCredentials(ctx context.Context) error {
 	}
 	log.Printf("[live] credentials verified ✓ (address: %s)", l.address)
 	return nil
+}
+
+// Balance returns the deposit wallet's REAL on-chain account value, split into
+// available collateral (cash) and the current mark value of open positions.
+// Total account value = cash + positions. The bankroll-floor safety net uses
+// this so the floor reflects actual money rather than a derived trade-ledger
+// figure — which is vulnerable to timing quirks like a backlog of old positions
+// all settling at once and double-counting against a fresh baseline.
+func (l *LiveExecutor) Balance(ctx context.Context) (cash, positions float64, err error) {
+	cash, err = l.collateralBalance(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	positions, err = l.positionsValue(ctx)
+	if err != nil {
+		// Do NOT fall back to cash-only here: open positions are real money, and
+		// silently dropping them to $0 understates the balance and can trip the
+		// bankroll floor on a transient data-api hiccup. Propagate the error so the
+		// caller marks the balance UNKNOWN and SKIPS the floor check this cycle.
+		return 0, 0, fmt.Errorf("positions value: %w", err)
+	}
+	return cash, positions, nil
+}
+
+// collateralBalance returns the deposit wallet's available USDC collateral via
+// the L2-authenticated CLOB /balance-allowance endpoint. USDC has 6 decimals.
+func (l *LiveExecutor) collateralBalance(ctx context.Context) (float64, error) {
+	const path = "/balance-allowance"
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		clobBaseURL+path+"?asset_type=COLLATERAL&signature_type=3", nil)
+	if err != nil {
+		return 0, err
+	}
+	// The L2 signature is computed over the bare path (no query string).
+	l.setAuthHeaders(req, "GET", path, "")
+
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("balance-allowance HTTP %d: %s", resp.StatusCode, body)
+	}
+	var r struct {
+		Balance string `json:"balance"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return 0, fmt.Errorf("balance-allowance decode: %w (body: %s)", err, body)
+	}
+	raw, err := strconv.ParseFloat(r.Balance, 64)
+	if err != nil {
+		return 0, fmt.Errorf("balance-allowance parse %q: %w", r.Balance, err)
+	}
+	return raw / 1e6, nil
+}
+
+// positionsValue returns the current mark value (USD) of the deposit wallet's
+// open positions via the public data-api.
+func (l *LiveExecutor) positionsValue(ctx context.Context) (float64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		"https://data-api.polymarket.com/value?user="+l.proxyWallet, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var arr []struct {
+		Value float64 `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&arr); err != nil {
+		return 0, err
+	}
+	if len(arr) == 0 {
+		return 0, nil
+	}
+	return arr[0].Value, nil
 }
 
 // sellSlippage is how far below the quoted price a stop-loss SELL will accept.
@@ -598,11 +681,11 @@ func (l *LiveExecutor) signOrder(salt, tokenID *big.Int, makerAmt, takerAmt, sid
 	typeLen := []byte{byte(len(contentsType) >> 8), byte(len(contentsType) & 0xff)}
 
 	wrapped := make([]byte, 0, 65+32+32+len(contentsType)+2)
-	wrapped = append(wrapped, ecdsaSig...)    // 65 bytes: ECDSA sig
-	wrapped = append(wrapped, domSep...)      // 32 bytes: app (exchange) domain separator
-	wrapped = append(wrapped, orderHash...)   // 32 bytes: Order struct hash
+	wrapped = append(wrapped, ecdsaSig...)     // 65 bytes: ECDSA sig
+	wrapped = append(wrapped, domSep...)       // 32 bytes: app (exchange) domain separator
+	wrapped = append(wrapped, orderHash...)    // 32 bytes: Order struct hash
 	wrapped = append(wrapped, contentsType...) // ORDER_TYPE_STRING as bytes
-	wrapped = append(wrapped, typeLen...)     // 2 bytes: big-endian length
+	wrapped = append(wrapped, typeLen...)      // 2 bytes: big-endian length
 
 	return "0x" + hex.EncodeToString(wrapped), nil
 }
@@ -648,22 +731,22 @@ func computeTypedDataSignHash(orderHash []byte, depositWallet string) []byte {
 
 	return keccak256(concatBytes(
 		typeHash,
-		orderHash,    // contents = Order struct hash
-		nameHash,     // name = "DepositWallet"
-		versionHash,  // version = "1"
-		chainID,      // chainId = 137
-		walletAddr,   // verifyingContract = deposit wallet
-		bytes32Zero,  // salt = bytes32(0)
+		orderHash,   // contents = Order struct hash
+		nameHash,    // name = "DepositWallet"
+		versionHash, // version = "1"
+		chainID,     // chainId = 137
+		walletAddr,  // verifyingContract = deposit wallet
+		bytes32Zero, // salt = bytes32(0)
 	))
 }
 
 // computeDomainSeparator pre-computes the EIP-712 domain separator.
 func (l *LiveExecutor) computeDomainSeparator(exchangeAddr string) []byte {
-	typeHash    := keccak256([]byte(domainTypeSig))
-	nameHash    := keccak256([]byte("Polymarket CTF Exchange"))
+	typeHash := keccak256([]byte(domainTypeSig))
+	nameHash := keccak256([]byte("Polymarket CTF Exchange"))
 	versionHash := keccak256([]byte(protocolVersion))
-	chainID     := padBigInt(big.NewInt(polygonChainID))
-	contract    := padHexAddr(exchangeAddr)
+	chainID := padBigInt(big.NewInt(polygonChainID))
+	contract := padHexAddr(exchangeAddr)
 
 	return keccak256(concatBytes(typeHash, nameHash, versionHash, chainID, contract))
 }
@@ -678,10 +761,10 @@ func (l *LiveExecutor) setAuthHeaders(req *http.Request, method, path, body stri
 	mac.Write([]byte(ts + method + path + body))
 	sig := base64.URLEncoding.EncodeToString(mac.Sum(nil))
 
-	req.Header.Set("POLY_ADDRESS",    l.address)
-	req.Header.Set("POLY_API_KEY",    l.apiKey)
-	req.Header.Set("POLY_SIGNATURE",  sig)
-	req.Header.Set("POLY_TIMESTAMP",  ts)
+	req.Header.Set("POLY_ADDRESS", l.address)
+	req.Header.Set("POLY_API_KEY", l.apiKey)
+	req.Header.Set("POLY_SIGNATURE", sig)
+	req.Header.Set("POLY_TIMESTAMP", ts)
 	req.Header.Set("POLY_PASSPHRASE", l.apiPassphrase)
 }
 

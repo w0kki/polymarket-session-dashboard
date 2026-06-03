@@ -25,7 +25,8 @@ var slugSports = map[string]string{
 	"spl": "Soccer", "mls": "Soccer", "bun": "Soccer", "ser": "Soccer",
 	"ucl": "Soccer", "uel": "Soccer", "wc": "Soccer", "afc": "Soccer",
 	"csl": "Soccer", "ksl": "Soccer", "jsl": "Soccer", "asl": "Soccer",
-	"mlb": "Baseball",
+	"bra": "Soccer", "tur": "Soccer", "nor": "Soccer", "fif": "Soccer",
+	"mlb": "Baseball", "kbo": "Baseball",
 	"nba": "Basketball", "wnba": "Basketball",
 	"nfl": "Football",
 	"nhl": "Hockey",
@@ -71,7 +72,7 @@ type clobResponse struct {
 // to be sized and executed (or paper-logged).
 type Opportunity struct {
 	ConditionID string
-	Market      string  // human-readable title
+	Market      string // human-readable title
 	Slug        string
 	Sport       string
 	Side        string  // winning outcome label, e.g. "Arizona Diamondbacks"
@@ -81,7 +82,8 @@ type Opportunity struct {
 	SizeUSDC    float64 // final position size after Kelly + cap
 	MaxPrice    float64 // sport price ceiling — used to compute takerAmount slippage tolerance
 	Icon        string
-	NegRisk     bool    // true = Neg Risk CTF Exchange; false = regular CTF Exchange
+	NegRisk     bool // true = Neg Risk CTF Exchange; false = regular CTF Exchange
+	PaperOnly   bool // execute via the paper executor only (never live) — e.g. doubles
 }
 
 // ── Scanner ───────────────────────────────────────────────────────────────────
@@ -104,13 +106,14 @@ type Scanner struct {
 	maxHoursToClose float64
 	minVolume       float64 // minimum total market volume in USD (0 = disabled)
 	sportBounds     map[string]SportBounds
+	paperDoubles    bool // if true, allow doubles into the watchlist tagged PaperOnly (paper-trade them)
 	client          *http.Client
 
 	gameIDMu    sync.Mutex     // guards gameIDCache
 	gameIDCache map[string]int // slug → gameId (0 = resolved-but-none)
 }
 
-func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose, minVolume float64, sportBounds map[string]SportBounds) *Scanner {
+func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursToClose, maxHoursToClose, minVolume float64, sportBounds map[string]SportBounds, paperDoubles bool) *Scanner {
 	if sportBounds == nil {
 		sportBounds = map[string]SportBounds{}
 	}
@@ -123,9 +126,16 @@ func NewScanner(threshold, maxPrice float64, sports []string, maxSize, minHoursT
 		maxHoursToClose: maxHoursToClose,
 		minVolume:       minVolume,
 		sportBounds:     sportBounds,
+		paperDoubles:    paperDoubles,
 		client:          &http.Client{Timeout: 20 * time.Second},
 		gameIDCache:     map[string]int{},
 	}
+}
+
+// isDoubles reports whether a market is a tennis doubles match (two-player teams).
+func isDoubles(m clobMarket) bool {
+	return strings.Contains(strings.ToLower(m.MarketSlug), "doubles") ||
+		strings.Contains(strings.ToLower(m.Question), "(doubles)")
 }
 
 // ResolveGameID maps a market slug to its Polymarket sports gameId via the
@@ -293,7 +303,8 @@ type WatchlistEntry struct {
 	Slug        string
 	Sport       string
 	Icon        string
-	NegRisk     bool   // true = Neg Risk CTF Exchange; false = regular CTF Exchange
+	NegRisk     bool // true = Neg Risk CTF Exchange; false = regular CTF Exchange
+	PaperOnly   bool // route to the paper executor regardless of live mode (e.g. doubles)
 }
 
 // BuildWatchlist does a full market scan and returns every market that passes
@@ -319,6 +330,7 @@ func (s *Scanner) BuildWatchlist(alreadyTraded, activePositions map[string]bool)
 			Sport:       sport,
 			Icon:        m.Icon,
 			NegRisk:     m.NegRisk,
+			PaperOnly:   isDoubles(m), // doubles only reach here when paperDoubles is on
 		})
 	}
 	return entries, nil
@@ -438,6 +450,7 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 		Icon:        m.Icon,
 		NegRisk:     entry.NegRisk,
 		MaxPrice:    maxPrice,
+		PaperOnly:   entry.PaperOnly,
 	}, nil
 }
 
@@ -625,21 +638,16 @@ func (s *Scanner) qualifies(m clobMarket, traded, positions map[string]bool) boo
 	if !moneylineSlug.MatchString(m.MarketSlug) {
 		return false
 	}
-	// Exclude doubles matches — slug contains "doubles" prefix segment.
-	if strings.Contains(strings.ToLower(m.MarketSlug), "doubles") {
+	// Doubles tennis: excluded by default (thin liquidity, noisy two-player
+	// upset risk). When paperDoubles is enabled they're allowed THROUGH here so
+	// they can be PAPER-traded — BuildWatchlist tags them PaperOnly and the poll
+	// loop routes them to the paper executor, so they NEVER touch live capital.
+	if isDoubles(m) && !s.paperDoubles {
 		return false
 	}
 	// Must be a head-to-head game/match — filters novelty props and futures.
 	// "vs." (with period, common in CLOB) and "vs " both pass.
 	if !strings.Contains(strings.ToLower(m.Question), " vs") {
-		return false
-	}
-	// Skip doubles tennis markets — the per-share upside at 96–99¢ is too
-	// small to justify the upset risk in a two-player team format.
-	// Check both the question text AND the slug (slugs always contain "-doubles-")
-	// so neither variation can slip through.
-	if strings.Contains(strings.ToLower(m.Question), "(doubles)") ||
-		strings.Contains(strings.ToLower(m.MarketSlug), "-doubles-") {
 		return false
 	}
 	// Skip Hamburg European Open — ATP 500 clay event where top-50 players

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,6 +48,16 @@ var (
 	placed   = map[string]bool{}
 )
 
+// floorBreachStreak counts consecutive safety checks that saw balance < floor.
+// The bankroll floor only HALTS after floorBreachConfirm consecutive readings,
+// so a single transient data-feed glitch (e.g. data-api /value momentarily
+// returning 0 open positions, which understates the balance to cash-only) can't
+// false-halt the bot. A real breach persists and confirms within a few cycles.
+var (
+	floorBreachStreak  int
+	floorBreachConfirm = 3
+)
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("")
@@ -61,7 +72,7 @@ func main() {
 	log.Printf("  Polymarket Risk Premia Bot — %s MODE", mode)
 	log.Printf("  Sports:    %v", cfg.Sports)
 	log.Printf("  Threshold: %.0f¢  Cap: $%.0f", cfg.EntryThreshold*100, cfg.MaxPositionSize)
-	log.Printf("  Discovery: every %ds  Poll: every %ds", cfg.ScanIntervalSec, cfg.PollIntervalSec)
+	log.Printf("  Discovery: every %ds  Poll: every %ds  Stop-loss: every %ds", cfg.ScanIntervalSec, cfg.PollIntervalSec, cfg.StopLossIntervalSec)
 	log.Printf("  DB:        %s", cfg.DBPath)
 	log.Printf("══════════════════════════════════════════════")
 
@@ -190,6 +201,15 @@ func main() {
 	} else {
 		log.Printf("  Stop Loss: disabled")
 	}
+	for _, s := range []string{"Tennis", "Baseball", "Hockey", "Basketball", "Soccer"} {
+		if d, ok := cfg.StopLossDropBySport[s]; ok {
+			if d <= 0 {
+				log.Printf("  Stop Loss [%s]: DISABLED (hold to settlement)", s)
+			} else {
+				log.Printf("  Stop Loss [%s]: %.0f¢ drop", s, d*100)
+			}
+		}
+	}
 	log.Printf("  Tennis: %.0f¢–%.0f¢  Baseball: %.0f¢–%.0f¢  Hockey: %.0f¢–%.0f¢",
 		cfg.TennisMinPrice*100, cfg.TennisMaxPrice*100,
 		cfg.BaseballMinPrice*100, cfg.BaseballMaxPrice*100,
@@ -212,7 +232,15 @@ func main() {
 		cfg.MaxHoursToClose,
 		cfg.MinVolume,
 		sportBounds,
+		cfg.PaperTradeDoubles,
 	)
+	if cfg.PaperTradeDoubles {
+		log.Printf("  Doubles: PAPER-ONLY (tennis doubles routed to paper executor for evaluation)")
+	}
+
+	// A paper executor is always available so paper-only markets (e.g. doubles)
+	// can be routed to it even while the bot trades live.
+	paperExec := executor.NewPaper(database)
 
 	// ── Telegram command listener ─────────────────────────────────────────────
 	notifier.ListenCommands(ctx, makeCmdHandler(cfg, database, notifier))
@@ -227,16 +255,38 @@ func main() {
 
 	discoveryTicker := time.NewTicker(time.Duration(cfg.ScanIntervalSec) * time.Second)
 	pollTicker := time.NewTicker(time.Duration(cfg.PollIntervalSec) * time.Second)
+	stopTicker := time.NewTicker(time.Duration(cfg.StopLossIntervalSec) * time.Second)
 	defer discoveryTicker.Stop()
 	defer pollTicker.Stop()
+	defer stopTicker.Stop()
+
+	// "running" guards prevent a slow pass from piling up if its ticker fires
+	// again before it finishes. The entry scan staggers across all markets and
+	// can take 30s+; running it (and the stop-loss) off the select loop keeps the
+	// stop-loss ticker firing on time so exits aren't blocked behind the scan.
+	var pollRunning, stopRunning atomic.Bool
 
 	for {
 		select {
 		case <-discoveryTicker.C:
-			// Run in a goroutine so it doesn't block the poll ticker.
 			go runDiscovery(ctx, cfg, database, scanner, notifier)
 		case <-pollTicker.C:
-			runPoll(ctx, cfg, database, scanner, exec, notifier)
+			if pollRunning.CompareAndSwap(false, true) {
+				go func() {
+					defer pollRunning.Store(false)
+					runPoll(ctx, cfg, database, scanner, exec, paperExec, notifier)
+				}()
+			}
+		case <-stopTicker.C:
+			// Dedicated fast stop-loss check, decoupled from the entry scan so a
+			// collapsing position is exited within StopLossIntervalSec rather than
+			// a full ~30s poll cycle.
+			if stopRunning.CompareAndSwap(false, true) {
+				go func() {
+					defer stopRunning.Store(false)
+					runStopLoss(ctx, cfg, database, scanner, exec, notifier)
+				}()
+			}
 		case <-ctx.Done():
 			log.Println("shutting down")
 			return
@@ -297,7 +347,7 @@ func runDiscovery(ctx context.Context, cfg *config.Config, database *db.DB, scan
 
 // runPoll checks every market on the watchlist for a qualifying price and
 // executes trades when the threshold is crossed. Runs every 10s (POLL_INTERVAL_SEC).
-func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, exec executor.Executor, n *notify.Notifier) {
+func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, exec, paperExec executor.Executor, n *notify.Notifier) {
 	// Snapshot the watchlist under read lock.
 	watchlistMu.RLock()
 	entries := make([]market.WatchlistEntry, len(watchlist))
@@ -308,20 +358,43 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 		return // discovery hasn't run yet
 	}
 
-	// Check stop loss on all open positions before looking for new entries.
-	runStopLoss(ctx, cfg, database, scanner, exec, n)
+	// Stop-loss now runs on its own dedicated ticker (see the main loop), so it
+	// is no longer gated behind this entry scan.
 
 	// Load bankroll and compute current balance.
 	// balance = bankroll + live P&L earned AFTER the bankroll was last set.
 	// Trades resolved before the bankroll was updated are already reflected in
 	// the bankroll figure itself, so we exclude them to avoid double-counting.
+	fallback := effectiveFallback(cfg, database)
 	bankroll, bankrollSince, err := database.GetBankroll()
 	if err != nil || bankroll <= 0 {
-		bankroll = cfg.FallbackSize * 3
+		bankroll = fallback * 3
 		bankrollSince = ""
 	}
+
+	// currentBalance is what the bankroll-floor safety net checks against.
+	// Prefer the REAL on-chain account value (cash + open positions) when live —
+	// it reflects actual money and is immune to ledger timing quirks (e.g. a
+	// backlog of old positions settling at once and double-counting against a
+	// fresh baseline, which previously caused a false floor breach). Fall back to
+	// the derived ledger figure only for paper mode. If the on-chain lookup fails
+	// transiently we mark the balance UNKNOWN so the floor is skipped this cycle —
+	// never halt on a fetch error.
 	livePnLSince, _ := database.GetLivePnLSince(bankrollSince)
 	currentBalance := bankroll + livePnLSince
+	balanceKnown := true
+	if br, ok := exec.(executor.BalanceReporter); ok {
+		if cash, positions, berr := br.Balance(ctx); berr == nil {
+			currentBalance = cash + positions
+		} else {
+			log.Printf("[safety] on-chain balance lookup failed — skipping bankroll-floor check this cycle: %v", berr)
+			balanceKnown = false
+		}
+	}
+	if balanceKnown {
+		// Cache for /status (and so it's available in dormant mode).
+		_ = database.SetSetting("last_balance", fmt.Sprintf("%.2f", currentBalance))
+	}
 
 	stats, err := database.GetTradeStats()
 	if err != nil {
@@ -330,12 +403,12 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 	kellyResult := kelly.Compute(
 		stats.Wins, stats.Losses,
 		stats.AvgWin, stats.AvgLoss,
-		bankroll, cfg.MaxPositionSize, cfg.FallbackSize,
+		bankroll, cfg.MaxPositionSize, fallback,
 	)
 	sizer := func(_ float64) float64 { return kellyResult.PositionSize }
 
 	// Check safety nets before entering any new positions.
-	if checkSafetyNets(cfg, database, bankroll, currentBalance, n) {
+	if checkSafetyNets(cfg, database, bankroll, currentBalance, balanceKnown, n) {
 		return
 	}
 
@@ -344,7 +417,7 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 	// steady trickle rather than a burst of 100+ requests fired simultaneously.
 	// e.g. 144 markets, 10s interval → ~69 ms between requests ≈ 14 req/s.
 	// Floor at 50 ms so a tiny watchlist doesn't spin too hot.
-	stagger := time.Duration(cfg.PollIntervalSec)*time.Second / time.Duration(len(entries))
+	stagger := time.Duration(cfg.PollIntervalSec) * time.Second / time.Duration(len(entries))
 	if stagger < 50*time.Millisecond {
 		stagger = 50 * time.Millisecond
 	}
@@ -483,15 +556,24 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff)
 		}
 
+		// Route paper-only opportunities (e.g. tennis doubles) to the paper
+		// executor so they NEVER touch live capital, regardless of live/paper mode.
+		placeExec := exec
+		tag := ""
+		if opp.PaperOnly {
+			placeExec = paperExec
+			tag = " [PAPER-ONLY]"
+		}
+
 		// Price qualifies — execute. Mark the market as placed BEFORE firing so a
 		// concurrent/next poll can't double-submit while the fill is confirmed.
-		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f",
-			opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC)
+		log.Printf("[poll] ✓ %s | %s @ %.1f¢ | $%.2f%s",
+			opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC, tag)
 		placedMu.Lock()
 		placed[opp.ConditionID] = true
 		placedMu.Unlock()
 
-		if err := exec.PlaceOrder(ctx, *opp); err != nil {
+		if err := placeExec.PlaceOrder(ctx, *opp); err != nil {
 			// Order accepted by the CLOB but no on-chain fill confirmed — keep it
 			// deduped (already marked placed), record nothing, don't alert.
 			if errors.Is(err, executor.ErrOrderUnconfirmed) {
@@ -544,25 +626,59 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 		orderFailMu.Lock()
 		delete(orderFailAt, opp.ConditionID)
 		orderFailMu.Unlock()
-		n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Slug, opp.Price, opp.SizeUSDC)
+		if opp.PaperOnly {
+			// Don't fire the (live-labelled) trade alert for paper-only trades —
+			// they're recorded as Paper in the DB and visible on the dashboard.
+			log.Printf("[poll] 📝 PAPER-ONLY recorded: %s | %s @ %.1f¢ | $%.2f", opp.Sport, opp.Side, opp.Price*100, opp.SizeUSDC)
+		} else {
+			n.TradePlaced(opp.Market, opp.Side, opp.Sport, opp.Slug, opp.Price, opp.SizeUSDC)
+		}
 	}
 }
 
 // ── Safety nets ───────────────────────────────────────────────────────────────
 
-func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalance float64, n *notify.Notifier) bool {
-	// 1. Bankroll floor — hard stop, requires manual restart.
+func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalance float64, balanceKnown bool, n *notify.Notifier) bool {
+	// 1. Bankroll floor — hard stop requiring manual intervention.
 	// Floor = configured bankroll × BankrollFloorPct (default 50%).
 	// currentBalance = bankroll + live-trade P&L only (paper excluded),
 	// so it tracks real money movement against the wallet balance.
+	//
+	// IMPORTANT: enter DORMANT mode (set bot_killed) rather than exiting. Under
+	// pm2 autorestart a plain os.Exit/Fatalf would immediately come back up,
+	// re-breach, and crash-loop while spamming the alert. Setting bot_killed
+	// first means the restarted process boots straight into halted mode (Telegram
+	// listener only, no trading) — so it alerts exactly once. Resume with /startup.
 	floor := bankroll * cfg.BankrollFloorPct
-	if bankroll > 0 && currentBalance < floor {
-		n.BankrollFloor(currentBalance, floor)
-		log.Fatalf(
-			"[safety] 🚨 BANKROLL FLOOR BREACHED — balance $%.2f < floor $%.2f (%.0f%% of $%.2f) — SHUTTING DOWN.",
-			currentBalance, floor, cfg.BankrollFloorPct*100, bankroll,
-		)
+	if balanceKnown && bankroll > 0 && currentBalance < floor {
+		// Confirm before halting: a single low reading is usually a transient feed
+		// glitch (e.g. data-api momentarily reporting 0 open positions, leaving only
+		// cash), not a real drawdown. Require floorBreachConfirm consecutive breaches.
+		floorBreachStreak++
+		if floorBreachStreak < floorBreachConfirm {
+			log.Printf(
+				"[safety] ⚠️ balance $%.2f < floor $%.2f (reading %d/%d) — pausing new entries, confirming before halt (guards against transient balance-feed glitches).",
+				currentBalance, floor, floorBreachStreak, floorBreachConfirm,
+			)
+			return true // skip new entries this cycle, but do NOT go dormant yet
+		}
+		halted, _ := database.GetSetting("bot_killed")
+		if halted != "true" {
+			_ = database.SetSetting("bot_killed", "true")
+			n.BankrollFloor(currentBalance, floor)
+			log.Printf(
+				"[safety] 🚨 BANKROLL FLOOR BREACHED (confirmed %d×) — balance $%.2f < floor $%.2f (%.0f%% of $%.2f) — entering DORMANT mode (resume with /startup).",
+				floorBreachStreak, currentBalance, floor, cfg.BankrollFloorPct*100, bankroll,
+			)
+			// Restart into halted mode.
+			if p, err := os.FindProcess(os.Getpid()); err == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
+		}
+		return true
 	}
+	// Healthy (or unknown) reading — reset the breach streak.
+	floorBreachStreak = 0
 
 	// Same-day safety override (set by /startup) bypasses the soft halts — the
 	// circuit breaker and daily loss limit — until midnight UTC. The bankroll
@@ -628,12 +744,18 @@ func checkSafetyNets(cfg *config.Config, database *db.DB, bankroll, currentBalan
 
 // ── Stop loss ─────────────────────────────────────────────────────────────────
 
-// effectiveStopLoss returns the live stop-loss drop (in price fraction, e.g.
-// 0.40 = 40¢). It reads the runtime override from the settings table (set via
-// the Telegram /stoploss command) and falls back to the STOP_LOSS_DROP env
-// value when no override is present. This lets the stop-loss be tuned live
-// without a restart — the same pattern as the bankroll setting.
-func effectiveStopLoss(cfg *config.Config, database *db.DB) float64 {
+// effectiveStopLoss returns the live stop-loss drop (price fraction, e.g.
+// 0.40 = 40¢) for a given sport. Precedence:
+//  1. Per-sport override (<SPORT>_STOP_LOSS_DROP env) — including 0, which
+//     DISABLES the stop for that sport (hold to settlement, e.g. Tennis).
+//  2. The global runtime override from the settings table (Telegram /stoploss).
+//  3. The global STOP_LOSS_DROP env default.
+//
+// Pass sport="" for the global value (e.g. /status, /stoploss).
+func effectiveStopLoss(cfg *config.Config, database *db.DB, sport string) float64 {
+	if d, ok := cfg.StopLossDropBySport[sport]; ok {
+		return d // per-sport wins, 0 = disabled for this sport
+	}
 	if raw, _ := database.GetSetting("stop_loss_drop"); raw != "" {
 		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
 			return v
@@ -642,13 +764,25 @@ func effectiveStopLoss(cfg *config.Config, database *db.DB) float64 {
 	return cfg.StopLossDrop
 }
 
+// effectiveFallback returns the live fallback position size: the Telegram-set
+// override (fallback_size setting) if present, otherwise the configured default.
+// The fallback is used to size a trade when Kelly can't be computed (not enough
+// loss data, or a non-positive edge).
+func effectiveFallback(cfg *config.Config, database *db.DB) float64 {
+	if raw, _ := database.GetSetting("fallback_size"); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return cfg.FallbackSize
+}
+
 // runStopLoss checks every open trade (paper and live) against the configured
 // stop loss price. For paper trades it updates the DB directly. For live trades
 // it places a real SELL order on the CLOB before updating the DB.
 func runStopLoss(ctx context.Context, cfg *config.Config, database *db.DB, scanner *market.Scanner, exec executor.Executor, n *notify.Notifier) {
-	if effectiveStopLoss(cfg, database) <= 0 {
-		return // feature disabled
-	}
+	// The stop is now per-sport: each check below resolves the drop for that
+	// trade's sport and skips (holds) if it's <= 0. No global early-return.
 
 	// ── Paper stop loss ───────────────────────────────────────────────────────
 	paperTrades, err := database.GetOpenPaperTrades()
@@ -695,21 +829,25 @@ func checkPaperStopLoss(ctx context.Context, cfg *config.Config, database *db.DB
 	if !open {
 		return // market settled — let resolveOpenTrades handle it
 	}
-	stopThreshold := t.EntryPrice - effectiveStopLoss(cfg, database)
+	drop := effectiveStopLoss(cfg, database, t.Sport)
+	if drop <= 0 {
+		return // stop-loss disabled for this sport — hold to settlement
+	}
+	stopThreshold := t.EntryPrice - drop
 	if price >= stopThreshold {
 		return // still above threshold, hold
 	}
 
 	sellProceeds := t.Shares * price
-	sellFee      := sellProceeds * 0.02
-	grossPnl     := sellProceeds - t.SizeUSDC
-	netPnl       := grossPnl - t.BuyFee - sellFee
-	netPnlPct    := 0.0
+	sellFee := sellProceeds * 0.02
+	grossPnl := sellProceeds - t.SizeUSDC
+	netPnl := grossPnl - t.BuyFee - sellFee
+	netPnlPct := 0.0
 	if t.SizeUSDC > 0 {
 		netPnlPct = netPnl / t.SizeUSDC
 	}
 	fullLoss := -(t.SizeUSDC + t.BuyFee)
-	saved    := netPnl - fullLoss
+	saved := netPnl - fullLoss
 
 	log.Printf("[stoploss/paper] ⛔ %s | %s | entry=%.1f¢ stop=%.1f¢ exit=%.1f¢ | P&L: $%.2f | saved: $%.2f",
 		t.Sport, t.Side[:min(30, len(t.Side))], t.EntryPrice*100, stopThreshold*100, price*100, netPnl, saved)
@@ -730,7 +868,11 @@ func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB,
 	if !open {
 		return // settled — let resolveLiveTrades handle it
 	}
-	stopThreshold := t.EntryPrice - effectiveStopLoss(cfg, database)
+	drop := effectiveStopLoss(cfg, database, t.Sport)
+	if drop <= 0 {
+		return // stop-loss disabled for this sport — hold to settlement
+	}
+	stopThreshold := t.EntryPrice - drop
 	if price >= stopThreshold {
 		return // still above threshold, hold
 	}
@@ -740,15 +882,35 @@ func checkLiveStopLoss(ctx context.Context, cfg *config.Config, database *db.DB,
 	}
 
 	sellProceeds := t.Shares * price
-	sellFee      := sellProceeds * 0.02
-	grossPnl     := sellProceeds - t.SizeUSDC
-	netPnl       := grossPnl - t.BuyFee - sellFee
-	netPnlPct    := 0.0
+	sellFee := sellProceeds * 0.02
+	grossPnl := sellProceeds - t.SizeUSDC
+	netPnl := grossPnl - t.BuyFee - sellFee
+	netPnlPct := 0.0
 	if t.SizeUSDC > 0 {
 		netPnlPct = netPnl / t.SizeUSDC
 	}
 	fullLoss := -(t.SizeUSDC + t.BuyFee)
-	saved    := netPnl - fullLoss
+	saved := netPnl - fullLoss
+
+	// No-liquidity write-off. When a backed favorite loses, its token collapses
+	// toward 0 and ALL bids disappear — a FAK sell just kills against an empty
+	// book, PlaceSellOrder can't confirm an exit, and the trade is retried every
+	// poll cycle (spamming the CLOB/logs) until the market settles minutes later.
+	// Below this price there is effectively no liquidity and nothing meaningful to
+	// recover, so record the realized loss ONCE and let on-chain settlement confirm
+	// $0 — rather than looping. Above it, a real exit may still fill, so we fall
+	// through and keep attempting (and retrying on transient failures) as before.
+	const noLiquidityFloor = 0.05 // 5¢
+	if price <= noLiquidityFloor {
+		log.Printf("[stoploss/live] 💀 %s | %s | entry=%.1f¢ collapsed to %.1f¢ — no book liquidity to exit; writing off $%.2f (no further retries)",
+			t.Sport, t.Side[:min(30, len(t.Side))], t.EntryPrice*100, price*100, netPnl)
+		if err := database.StopLossLiveTrade(t.ConditionID, price, sellFee, grossPnl, netPnlPct); err != nil {
+			log.Printf("[stoploss/live] write-off DB update failed %s: %v", t.ConditionID[:12], err)
+			return
+		}
+		n.StopLossTriggered(t.Market, t.Side, t.Sport, t.Slug, price, netPnl, saved)
+		return
+	}
 
 	log.Printf("[stoploss/live] ⛔ %s | %s | entry=%.1f¢ stop=%.1f¢ exit=%.1f¢ | P&L: $%.2f | saved: $%.2f",
 		t.Sport, t.Side[:min(30, len(t.Side))], t.EntryPrice*100, stopThreshold*100, price*100, netPnl, saved)
@@ -828,15 +990,15 @@ func resolveLiveTrades(ctx context.Context, database *db.DB, scanner *market.Sca
 			continue
 		}
 
-		outcome  := "LOSS"
+		outcome := "LOSS"
 		exitPrice := 0.0
 		if won {
-			outcome   = "WIN"
+			outcome = "WIN"
 			exitPrice = 1.0
 		}
 
-		grossPnl  := t.Shares*exitPrice - t.SizeUSDC
-		netPnl    := grossPnl - t.BuyFee
+		grossPnl := t.Shares*exitPrice - t.SizeUSDC
+		netPnl := grossPnl - t.BuyFee
 		netPnlPct := 0.0
 		if t.SizeUSDC > 0 {
 			netPnlPct = netPnl / t.SizeUSDC
@@ -879,6 +1041,7 @@ func min(a, b int) int {
 //	/clearbreaker  — clear an active circuit breaker immediately
 //	/bankroll <n>  — set the bankroll used for Kelly sizing
 //	/stoploss <c>  — set the stop-loss drop in cents (e.g. /stoploss 25)
+//	/fallback <n>  — set the fallback trade size in dollars (e.g. /fallback 50)
 //	/stop          — graceful shutdown (pm2 will restart in paper mode)
 //	/live          — switch to live trading on next restart
 //	/paper         — switch to paper trading on next restart
@@ -914,14 +1077,41 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			bankroll, since, _ := database.GetBankroll()
 			livePnLSince, _ := database.GetLivePnLSince(since)
 			balance := bankroll + livePnLSince
-			stopDrop := effectiveStopLoss(cfg, database)
+			balanceLabel := "Balance (ledger)"
+			// Prefer the real on-chain balance the poll loop cached, when available.
+			if lb, _ := database.GetSetting("last_balance"); lb != "" {
+				if v, perr := strconv.ParseFloat(lb, 64); perr == nil {
+					balance = v
+					balanceLabel = "Balance (on-chain)"
+				}
+			}
+			stopDrop := effectiveStopLoss(cfg, database, "")
+			// Note any per-sport stop-loss overrides (e.g. Tennis disabled).
+			stopNote := ""
+			if len(cfg.StopLossDropBySport) > 0 {
+				var parts []string
+				for _, s := range []string{"Tennis", "Baseball", "Hockey", "Basketball", "Soccer"} {
+					if d, ok := cfg.StopLossDropBySport[s]; ok {
+						if d <= 0 {
+							parts = append(parts, s+": off")
+						} else {
+							parts = append(parts, fmt.Sprintf("%s: %.0f¢", s, d*100))
+						}
+					}
+				}
+				if len(parts) > 0 {
+					stopNote = " [" + strings.Join(parts, ", ") + "]"
+				}
+			}
 
 			// Trading-halt status: surface the daily-loss-limit halt and the
 			// /startup safety override, which are separate from the circuit breaker.
 			today := time.Now().UTC().Format("2006-01-02")
 			overrideDate, _ := database.GetSetting("safety_override")
 			tradingMsg := "active"
-			if overrideDate == today {
+			if killed, _ := database.GetSetting("bot_killed"); killed == "true" {
+				tradingMsg = "DORMANT (halted — send /startup to resume)"
+			} else if overrideDate == today {
 				tradingMsg = "active (safety override until midnight UTC)"
 			} else if breaker != "" {
 				tradingMsg = "HALTED (circuit breaker)"
@@ -934,21 +1124,23 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 					"Mode: %s (override: %s)\n"+
 					"Trading: %s\n"+
 					"Circuit breaker: %s\n"+
-					"Stop-loss: %.0f¢ drop\n"+
+					"Stop-loss: %.0f¢ drop%s\n"+
+					"Fallback size: $%.2f\n"+
 					"Open paper trades: %d\n"+
 					"Open live trades: %d\n"+
 					"Today P&L: $%.2f (daily limit -$%.0f)\n"+
 					"All-time P&L: $%.2f\n"+
-					"Bankroll: $%.2f | Balance: $%.2f",
+					"Bankroll: $%.2f | %s: $%.2f",
 				mode, override,
 				tradingMsg,
 				breakerMsg,
-				stopDrop*100,
+				stopDrop*100, stopNote,
+				effectiveFallback(cfg, database),
 				len(paperTrades),
 				len(liveTrades),
 				todayPnL, cfg.MaxDailyLoss,
 				allPnL,
-				bankroll, balance,
+				bankroll, balanceLabel, balance,
 			))
 
 		case "clearbreaker":
@@ -992,15 +1184,40 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 				n.Broadcast("❌ Stop-loss must be between 1¢ and 99¢.")
 				return
 			}
-			oldDrop := effectiveStopLoss(cfg, database)
+			oldDrop := effectiveStopLoss(cfg, database, "")
 			if err := database.SetSetting("stop_loss_drop", fmt.Sprintf("%.4f", drop)); err != nil {
 				n.Broadcast("❌ Failed to update stop-loss: " + err.Error())
 				return
 			}
+			perSportNote := ""
+			if len(cfg.StopLossDropBySport) > 0 {
+				perSportNote = "\n(Note: per-sport overrides set via env still apply and are unaffected — see /status.)"
+			}
 			log.Printf("[cmd] stop-loss drop %.0f¢ → %.0f¢ via Telegram", oldDrop*100, drop*100)
 			n.Broadcast(fmt.Sprintf(
-				"🛡 Stop-loss updated: %.0f¢ → %.0f¢ drop.\nA 95¢ entry now exits at %.0f¢. Takes effect on the next stop-loss check (no restart).",
-				oldDrop*100, drop*100, (0.95-drop)*100,
+				"🛡 Stop-loss (global default) updated: %.0f¢ → %.0f¢ drop.\nA 95¢ entry now exits at %.0f¢. Takes effect on the next stop-loss check (no restart).%s",
+				oldDrop*100, drop*100, (0.95-drop)*100, perSportNote,
+			))
+
+		case "fallback":
+			v, err := strconv.ParseFloat(strings.TrimPrefix(strings.TrimSpace(args), "$"), 64)
+			if err != nil || v <= 0 {
+				n.Broadcast("❌ Usage: /fallback <dollars>  e.g. /fallback 50")
+				return
+			}
+			if v > cfg.MaxPositionSize {
+				n.Broadcast(fmt.Sprintf("❌ Fallback $%.0f exceeds the max position size $%.0f. Lower the fallback or raise the cap first.", v, cfg.MaxPositionSize))
+				return
+			}
+			oldFb := effectiveFallback(cfg, database)
+			if err := database.SetSetting("fallback_size", fmt.Sprintf("%.2f", v)); err != nil {
+				n.Broadcast("❌ Failed to update fallback: " + err.Error())
+				return
+			}
+			log.Printf("[cmd] fallback size $%.2f → $%.2f via Telegram", oldFb, v)
+			n.Broadcast(fmt.Sprintf(
+				"💵 Fallback trade size updated: $%.2f → $%.2f.\nUsed when Kelly can't size a trade. Takes effect on the next trade (no restart).",
+				oldFb, v,
 			))
 
 		case "kill":

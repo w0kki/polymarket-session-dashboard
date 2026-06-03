@@ -161,15 +161,21 @@ func (d *DB) GetLiveAllTimePnL() (float64, error) {
 	return pnl, err
 }
 
-// GetTodayPnL returns the sum of resolved P&L for trades entered today (UTC).
+// GetTodayPnL returns the sum of live P&L RESOLVED today (UTC) — the figure the
+// daily-loss limit checks against. Keyed on the resolution timestamp (updated_at),
+// not the entry date: a position entered late yesterday that loses after midnight
+// is a loss that happened today and must count toward today's limit. (The old
+// entry-date basis let cross-midnight losses slip past the limit entirely.)
+// Live trade types only — paper outcomes must not trip the live halt.
 func (d *DB) GetTodayPnL() (float64, error) {
 	var pnl float64
 	err := d.conn.QueryRow(`
-		SELECT COALESCE(SUM(COALESCE(net_pnl, pnl)), 0)
+		SELECT COALESCE(SUM(net_pnl), 0)
 		FROM trades
-		WHERE date = date('now')
+		WHERE date(updated_at) = date('now')
 		  AND outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
-		  AND pnl IS NOT NULL
+		  AND net_pnl IS NOT NULL
+		  AND trade_type IN ('Risk Premia', 'Latency Arb')
 	`).Scan(&pnl)
 	return pnl, err
 }

@@ -16,6 +16,13 @@ type Executor interface {
 	PlaceOrder(ctx context.Context, opp market.Opportunity) error
 }
 
+// BalanceReporter is implemented by executors that can report the wallet's REAL
+// on-chain account value (live only). The bankroll-floor safety net prefers this
+// over the derived trade-ledger figure. Paper mode does not implement it.
+type BalanceReporter interface {
+	Balance(ctx context.Context) (cash, positions float64, err error)
+}
+
 // ── Paper executor ────────────────────────────────────────────────────────────
 
 // PaperExecutor logs trades to the shared SQLite DB without touching
