@@ -108,7 +108,6 @@ func (n *Notifier) TradePlaced(market, side, sport, slug string, price, size flo
 }
 
 // TradeResolved fires when a trade settles as WIN or LOSS.
-// Silent for small wins (< $5) to reduce noise.
 func (n *Notifier) TradeResolved(market, side, outcome, slug string, pnl float64) {
 	url := polyURL(slug)
 	switch {
@@ -120,7 +119,7 @@ func (n *Notifier) TradeResolved(market, side, outcome, slug string, pnl float64
 			return
 		}
 		n.broadcastLink(discord, telegram)
-	case outcome == "WIN" && pnl >= 5.0:
+	case outcome == "WIN":
 		discord := fmt.Sprintf("✅ **WIN** — %s · Moneyline\n[%s](%s)\n▶ %s | P&L: +$%.2f", n.mode, market, url, side, pnl)
 		telegram := fmt.Sprintf("✅ <b>WIN</b> — %s · Moneyline\n<a href=\"%s\">%s</a>\n▶ %s | P&L: +$%.2f", n.mode, url, market, side, pnl)
 		if url == "" {
