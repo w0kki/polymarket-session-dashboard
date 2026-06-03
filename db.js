@@ -99,34 +99,66 @@ const upsertTrade = db.prepare(`
   ON CONFLICT(condition_id) DO UPDATE SET
     date         = excluded.date,
     market       = excluded.market,
-    exit_price   = excluded.exit_price,
-    -- Paper: never overwrite (bot owns paper outcomes).
-    -- Live:  never overwrite a resolved outcome with 'NA' (bot may have already
-    --        resolved it via resolveLiveTrades before the hourly sync runs).
-    --        If sync has a definitive outcome (not 'NA'), always accept it.
+    -- Authoritative-record rules. Two cases where the BOT, not sync, owns the
+    -- numbers and sync must NOT overwrite them:
+    --   Paper      — the bot owns paper outcomes entirely.
+    --   STOP_LOSS  — the bot actually SOLD the position early at a known price,
+    --                so its exit_price / P&L are real. The market's eventual
+    --                settlement is irrelevant to what we realized. (Previously
+    --                sync reclassified stop-loss exits to WIN/LOSS with
+    --                settlement values, corrupting the realized P&L.)
+    -- Otherwise: never overwrite a resolved live outcome with 'NA' (the bot may
+    -- have resolved it before the hourly sync); accept any definitive sync value.
+    exit_price   = CASE
+                     WHEN trades.trade_type = 'Paper'    THEN trades.exit_price
+                     WHEN trades.outcome   = 'STOP_LOSS' THEN trades.exit_price
+                     ELSE excluded.exit_price
+                   END,
     outcome      = CASE
                      WHEN trades.trade_type = 'Paper'                        THEN trades.outcome
+                     WHEN trades.outcome   = 'STOP_LOSS'                     THEN trades.outcome
                      WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.outcome
                      ELSE excluded.outcome
                    END,
     pnl          = CASE
                      WHEN trades.trade_type = 'Paper'                        THEN trades.pnl
+                     WHEN trades.outcome   = 'STOP_LOSS'                     THEN trades.pnl
                      WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.pnl
                      ELSE excluded.pnl
                    END,
     pnl_pct      = CASE
                      WHEN trades.trade_type = 'Paper'                        THEN trades.pnl_pct
+                     WHEN trades.outcome   = 'STOP_LOSS'                     THEN trades.pnl_pct
                      WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.pnl_pct
                      ELSE excluded.pnl_pct
                    END,
     net_pnl      = CASE
                      WHEN trades.trade_type = 'Paper'                        THEN trades.net_pnl
+                     WHEN trades.outcome   = 'STOP_LOSS'                     THEN trades.net_pnl
                      WHEN trades.outcome != 'NA' AND excluded.outcome = 'NA' THEN trades.net_pnl
                      ELSE excluded.net_pnl
                    END,
-    sell_fee     = excluded.sell_fee,
-    total_fees   = excluded.total_fees,
-    updated_at   = datetime('now')
+    sell_fee     = CASE
+                     WHEN trades.trade_type = 'Paper'    THEN trades.sell_fee
+                     WHEN trades.outcome   = 'STOP_LOSS' THEN trades.sell_fee
+                     ELSE excluded.sell_fee
+                   END,
+    total_fees   = CASE
+                     WHEN trades.trade_type = 'Paper'    THEN trades.total_fees
+                     WHEN trades.outcome   = 'STOP_LOSS' THEN trades.total_fees
+                     ELSE excluded.total_fees
+                   END,
+    -- updated_at is a STABLE resolution timestamp: bump it ONLY when this sync
+    -- actually resolves a live trade (NA → final outcome). Previously this was an
+    -- unconditional datetime('now'), so every hourly sync re-stamped every already
+    -- resolved trade — making old wins/losses re-appear inside time-windowed P&L
+    -- queries (GetLivePnLSince, the daily-loss limit) and double-counting them.
+    updated_at   = CASE
+                     WHEN trades.trade_type != 'Paper'
+                       AND trades.outcome = 'NA' AND excluded.outcome != 'NA'
+                     THEN datetime('now')
+                     ELSE trades.updated_at
+                   END
 `);
 
 export const upsertTrades = db.transaction((rows) => {
