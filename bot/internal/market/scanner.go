@@ -416,7 +416,9 @@ func (s *Scanner) PollOpportunity(entry WatchlistEntry, sizer func(float64) floa
 
 	// Volume check — only call Gamma API when price already qualifies to keep
 	// the hot path (no-op polls) free of extra HTTP requests.
-	if s.minVolume > 0 {
+	// Skip for paper-only entries (e.g. doubles): thin liquidity is fine when
+	// we're not placing a real order.
+	if s.minVolume > 0 && !entry.PaperOnly {
 		vol, err := s.fetchVolume(entry.ConditionID)
 		if err != nil {
 			// Fail CLOSED: if we can't verify volume we skip rather than risk a
