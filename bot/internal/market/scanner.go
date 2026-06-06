@@ -722,13 +722,15 @@ func bestOutcome(m clobMarket) (string, float64) {
 // so we skip the historical backlog by starting well into the pagination.
 // "NjUwMDAw" = base64("650000"); adjust upward as the market count grows.
 func (s *Scanner) fetchMarkets() ([]clobMarket, error) {
-	const maxPages = 200 // safety cap — plenty of room beyond the current ~84 pages remaining
+	const maxPages = 300 // safety cap — covers ~300k markets from start offset
 	var all []clobMarket
-	// CLOB API has ~1,184 pages total sorted oldest-first.
-	// May 2026 markets begin at page ~1,050; today's live matches at ~1,170.
-	// Start at offset 1,100,000 (page 1,100) to scan only the recent tail.
-	// "MTEwMDAwMA==" = base64("1100000")
-	cursor := "MTEwMDAwMA=="
+	// CLOB API is sorted oldest-first. Market growth pushes today's live matches
+	// further out over time; this cursor + maxPages window must be advanced
+	// periodically (verified 2026-06-06: today's tennis was at offset ~1,320,000,
+	// previously the bot stopped at 1,300,000 and silently missed all tennis).
+	// Start at offset 1,200,000 to skip dead historical markets and speed the scan.
+	// "MTIwMDAwMA==" = base64("1200000")
+	cursor := "MTIwMDAwMA=="
 
 	for page := 0; page < maxPages; page++ {
 		url := fmt.Sprintf("https://clob.polymarket.com/markets?next_cursor=%s", cursor)
