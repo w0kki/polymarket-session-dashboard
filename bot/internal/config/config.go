@@ -155,16 +155,18 @@ type Config struct {
 	TennisMinSet int
 
 	// Baseball game-stage gate. Live inning + score come from the
-	// sports_collector.py sidecar. A baseball market is only traded when the
-	// game has reached BaseballMinInning OR the run differential is at least
-	// BaseballRunDiff (a blowout, decided early). This avoids early-game
-	// entries where a favorite still has lots of variance left.
-	//   0/0 = disabled
-	//   6/6 = enter from the 6th inning on, or earlier if up by 6+ runs
+	// sports_collector.py sidecar. Gate logic (Option B):
+	//   PASS if inning >= BaseballMinInning AND diff >= BaseballMinRunDiff
+	//   PASS if diff >= BaseballRunDiff  (blowout bypass, any inning)
+	// BaseballMinRunDiff is the cushion required when using the inning gate.
+	// BaseballRunDiff is the larger "blowout" threshold that bypasses the inning
+	// requirement entirely. Setting BaseballMinRunDiff=0 falls back to the old
+	// OR behaviour (inning >= min OR diff >= blowout).
 	// If enabled and no fresh live state is available, the market is skipped.
-	// BASEBALL_MIN_INNING / BASEBALL_RUN_DIFF (default 0)
-	BaseballMinInning int
-	BaseballRunDiff   int
+	// BASEBALL_MIN_INNING / BASEBALL_RUN_DIFF / BASEBALL_MIN_RUN_DIFF (default 0)
+	BaseballMinInning  int
+	BaseballRunDiff    int
+	BaseballMinRunDiff int
 
 	// Hockey game-stage gate, same idea as baseball but with periods/goals.
 	// Enter only when the game has reached HockeyMinPeriod OR the goal
@@ -232,6 +234,7 @@ func Load() *Config {
 		TennisMinSet:          envInt("TENNIS_MIN_SET", 0),
 		BaseballMinInning:     envInt("BASEBALL_MIN_INNING", 0),
 		BaseballRunDiff:       envInt("BASEBALL_RUN_DIFF", 0),
+		BaseballMinRunDiff:    envInt("BASEBALL_MIN_RUN_DIFF", 0),
 		HockeyMinPeriod:       envInt("HOCKEY_MIN_PERIOD", 0),
 		HockeyGoalDiff:        envInt("HOCKEY_GOAL_DIFF", 0),
 		BasketballMinQuarter:  envInt("BASKETBALL_MIN_QUARTER", 0),

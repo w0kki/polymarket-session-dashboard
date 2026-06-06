@@ -273,10 +273,16 @@ func runDiff(score string) int {
 }
 
 // GameStageOK reports whether a period-based game (baseball innings, hockey
-// periods) is far enough along to trade. Allows entry when the game has reached
-// minPeriod OR the score differential is at least minDiff (a blowout, decided
-// early). Either threshold being 0 disables that arm of the check.
-func GameStageOK(period, score string, minPeriod, minDiff int) bool {
+// periods) is far enough along to trade.
+//
+// Logic (Option B):
+//   - PASS if inning >= minPeriod AND run_diff >= minCombinedDiff  (late + cushion)
+//   - PASS if run_diff >= minDiff                                  (blowout, any inning)
+//
+// When minCombinedDiff == 0 the combined arm falls back to the old OR behaviour
+// (inning >= minPeriod OR diff >= minDiff). Either threshold being 0 disables
+// that arm entirely.
+func GameStageOK(period, score string, minPeriod, minDiff, minCombinedDiff int) bool {
 	if minPeriod <= 0 && minDiff <= 0 {
 		return true // gating disabled
 	}
@@ -285,11 +291,15 @@ func GameStageOK(period, score string, minPeriod, minDiff int) bool {
 	if p == 0 && diff == 0 {
 		return false // no usable live state — fail closed
 	}
-	if minPeriod > 0 && p >= minPeriod {
-		return true
-	}
+	// Blowout bypass: large lead at any inning.
 	if minDiff > 0 && diff >= minDiff {
 		return true
+	}
+	// Late-inning arm: require both inning threshold AND a minimum cushion.
+	if minPeriod > 0 && p >= minPeriod {
+		if minCombinedDiff <= 0 || diff >= minCombinedDiff {
+			return true
+		}
 	}
 	return false
 }

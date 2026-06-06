@@ -490,8 +490,9 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				gameID, ls.Period, ls.Score, cfg.TennisMinSet)
 		}
 
-		// Baseball game-stage gate: only enter once the game is late (≥ min
-		// inning) or already a blowout (run diff ≥ threshold).
+		// Baseball game-stage gate (Option B):
+		//   PASS if inning >= BaseballMinInning AND diff >= BaseballMinRunDiff
+		//   PASS if diff >= BaseballRunDiff  (blowout bypass, any inning)
 		if opp.Sport == "Baseball" && (cfg.BaseballMinInning > 0 || cfg.BaseballRunDiff > 0) {
 			gameID, ok := scanner.ResolveGameID(opp.Slug)
 			if !ok {
@@ -503,13 +504,13 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				log.Printf("[poll] baseball gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
 				continue
 			}
-			if !market.GameStageOK(ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff) {
-				log.Printf("[poll] baseball gate: game %d in %q (score %q) — below inning %d / run-diff %d, skipping %s",
-					gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff, opp.Side)
+			if !market.GameStageOK(ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff, cfg.BaseballMinRunDiff) {
+				log.Printf("[poll] baseball gate: game %d in %q (score %q) — below inning %d+diff≥%d / blowout≥%d, skipping %s",
+					gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballMinRunDiff, cfg.BaseballRunDiff, opp.Side)
 				continue
 			}
-			log.Printf("[poll] baseball gate: ✓ game %d in %q (score %q) — inning≥%d or runDiff≥%d OK",
-				gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff)
+			log.Printf("[poll] baseball gate: ✓ game %d in %q (score %q) — (inning≥%d AND diff≥%d) or blowout≥%d OK",
+				gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballMinRunDiff, cfg.BaseballRunDiff)
 		}
 
 		// Hockey game-stage gate: only enter from the min period on, or once the
@@ -525,7 +526,7 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				log.Printf("[poll] hockey gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
 				continue
 			}
-			if !market.GameStageOK(ls.Period, ls.Score, cfg.HockeyMinPeriod, cfg.HockeyGoalDiff) {
+			if !market.GameStageOK(ls.Period, ls.Score, cfg.HockeyMinPeriod, cfg.HockeyGoalDiff, 0) {
 				log.Printf("[poll] hockey gate: game %d in %q (score %q) — below period %d / goal-diff %d, skipping %s",
 					gameID, ls.Period, ls.Score, cfg.HockeyMinPeriod, cfg.HockeyGoalDiff, opp.Side)
 				continue
@@ -547,7 +548,7 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				log.Printf("[poll] basketball gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
 				continue
 			}
-			if !market.GameStageOK(ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff) {
+			if !market.GameStageOK(ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff, 0) {
 				log.Printf("[poll] basketball gate: game %d in %q (score %q) — below quarter %d / point-diff %d, skipping %s",
 					gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff, opp.Side)
 				continue
