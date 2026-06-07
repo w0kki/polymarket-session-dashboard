@@ -58,13 +58,26 @@ type Config struct {
 	HockeyMinPrice float64
 	HockeyMaxPrice float64
 
-	// Soccer (UCL, UEL, MLS, etc.): only trade in the final 30 minutes of a match
-	// (≈70th minute onward). EndDateISO is used as a proxy for elapsed game time.
+	// Soccer (UCL, UEL, MLS, etc.). The "final 30 minutes" EndDateISO time-window
+	// was broken — Polymarket sets end_date_iso to midnight of the match date,
+	// not the real match clock — so it fired only after the match was over.
+	// Replaced with a half-of-match + goal-differential gate (Option A) using
+	// live_sports.period values "1H"/"2H" + score parsing. For the real
+	// minute-clock gate we'd need sports_collector to capture WS clock data
+	// (see follow-up: soccer minute clock).
+	//   PASS if half >= SoccerMinHalf AND goal_diff >= SoccerMinGoalDiff
+	//   PASS if goal_diff >= SoccerGoalDiff  (blowout bypass, any half)
 	// SOCCER_MIN_PRICE (default 0.94), SOCCER_MAX_PRICE (default 0.97)
-	// SOCCER_MAX_HOURS_TO_CLOSE (default 0.5 = 30 min remaining ≈ 70th minute)
+	// SOCCER_MIN_HALF (default 0 = disabled)
+	// SOCCER_GOAL_DIFF (default 0 = disabled, blowout threshold)
+	// SOCCER_MIN_GOAL_DIFF (default 0, cushion required in 2H)
+	// SOCCER_MAX_HOURS_TO_CLOSE retained but should be 0 — kept for backwards-compat.
 	SoccerMinPrice        float64
 	SoccerMaxPrice        float64
 	SoccerMaxHoursToClose float64
+	SoccerMinHalf         int
+	SoccerGoalDiff        int
+	SoccerMinGoalDiff     int
 
 	// Hard cap on position size regardless of Kelly output ($30).
 	MaxPositionSize float64
@@ -214,7 +227,10 @@ func Load() *Config {
 		HockeyMaxPrice:        envFloat("HOCKEY_MAX_PRICE", 0.97),
 		SoccerMinPrice:        envFloat("SOCCER_MIN_PRICE", 0.94),
 		SoccerMaxPrice:        envFloat("SOCCER_MAX_PRICE", 0.97),
-		SoccerMaxHoursToClose: envFloat("SOCCER_MAX_HOURS_TO_CLOSE", 0.5),
+		SoccerMaxHoursToClose: envFloat("SOCCER_MAX_HOURS_TO_CLOSE", 0),
+		SoccerMinHalf:         envInt("SOCCER_MIN_HALF", 0),
+		SoccerGoalDiff:        envInt("SOCCER_GOAL_DIFF", 0),
+		SoccerMinGoalDiff:     envInt("SOCCER_MIN_GOAL_DIFF", 0),
 		MaxPositionSize:       envFloat("MAX_POSITION_SIZE", 30.0),
 		MinVolume:             envFloat("MIN_VOLUME", 50000.0),
 		Sports:                envStrings("SPORTS", []string{"Baseball", "Tennis"}),

@@ -215,10 +215,15 @@ func main() {
 		cfg.BaseballMinPrice*100, cfg.BaseballMaxPrice*100,
 		cfg.HockeyMinPrice*100, cfg.HockeyMaxPrice*100,
 	)
-	log.Printf("  Soccer: %.0f¢–%.0f¢  (final %.0f min of match only)",
-		cfg.SoccerMinPrice*100, cfg.SoccerMaxPrice*100,
-		cfg.SoccerMaxHoursToClose*60,
-	)
+	if cfg.SoccerMinHalf > 0 || cfg.SoccerGoalDiff > 0 {
+		log.Printf("  Soccer: %.0f¢–%.0f¢  ((half≥%d AND diff≥%d) OR diff≥%d)",
+			cfg.SoccerMinPrice*100, cfg.SoccerMaxPrice*100,
+			cfg.SoccerMinHalf, cfg.SoccerMinGoalDiff, cfg.SoccerGoalDiff,
+		)
+	} else {
+		log.Printf("  Soccer: %.0f¢–%.0f¢  (no game-state gate)",
+			cfg.SoccerMinPrice*100, cfg.SoccerMaxPrice*100)
+	}
 	if cfg.MinVolume > 0 {
 		log.Printf("  Min volume: $%.0f", cfg.MinVolume)
 	}
@@ -602,6 +607,32 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 			}
 			log.Printf("[poll] basketball gate: ✓ game %d in %q (score %q) — (quarter≥%d AND diff≥%d) or blowout≥%d OK",
 				gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballMinPointDiff, cfg.BasketballPointDiff)
+		}
+
+		// Soccer game-stage gate (Path A — half-of-match + goal-diff):
+		//   PASS if half >= SoccerMinHalf AND diff >= SoccerMinGoalDiff
+		//   PASS if diff >= SoccerGoalDiff  (blowout bypass, any half)
+		// Uses live_sports.period which reports "1H"/"2H"/"VFT" for soccer.
+		// Replaces the broken end_date_iso time-window check (Polymarket sets
+		// end_date_iso to midnight of match date, not real match clock).
+		if opp.Sport == "Soccer" && (cfg.SoccerMinHalf > 0 || cfg.SoccerGoalDiff > 0) {
+			gameID, ok := scanner.ResolveGameID(opp.Slug)
+			if !ok {
+				log.Printf("[poll] soccer gate: no gameId for %s — skipping", opp.Slug)
+				continue
+			}
+			ls, _ := database.GetLiveSport(gameID)
+			if ls == nil || !ls.Live {
+				log.Printf("[poll] soccer gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
+				continue
+			}
+			if !market.GameStageOK(ls.Period, ls.Score, cfg.SoccerMinHalf, cfg.SoccerGoalDiff, cfg.SoccerMinGoalDiff) {
+				log.Printf("[poll] soccer gate: game %d in %q (score %q) — below half %d+diff≥%d / blowout≥%d, skipping %s",
+					gameID, ls.Period, ls.Score, cfg.SoccerMinHalf, cfg.SoccerMinGoalDiff, cfg.SoccerGoalDiff, opp.Side)
+				continue
+			}
+			log.Printf("[poll] soccer gate: ✓ game %d in %q (score %q) — (half≥%d AND diff≥%d) or blowout≥%d OK",
+				gameID, ls.Period, ls.Score, cfg.SoccerMinHalf, cfg.SoccerMinGoalDiff, cfg.SoccerGoalDiff)
 		}
 
 		// Route paper-only opportunities (e.g. tennis doubles) to the paper
