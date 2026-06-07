@@ -297,6 +297,29 @@ func main() {
 // evictFromWatchlist removes a single market from the in-memory watchlist.
 // Called when order placement returns order_version_mismatch — the CLOB has
 // closed the market but hasn't updated accepting_orders yet. The market will be
+// splitMatchTeams parses a Polymarket market question like
+// "Detroit Tigers vs. Tampa Bay Rays" into ("Detroit Tigers", "Tampa Bay Rays").
+// Polymarket always lists home team first in MLB markets. Handles "vs." and "vs"
+// separators, trimming whitespace and punctuation. Returns ("", "") on failure.
+func splitMatchTeams(question string) (home, away string) {
+	q := question
+	// Polymarket usually formats as "Home vs. Away" — try " vs. " first, fall back to " vs ".
+	for _, sep := range []string{" vs. ", " vs "} {
+		if idx := strings.Index(strings.ToLower(q), sep); idx >= 0 {
+			home = strings.TrimSpace(q[:idx])
+			away = strings.TrimSpace(q[idx+len(sep):])
+			// Some markets append " — Moneyline" or similar; strip after a long-dash or colon.
+			for _, suffix := range []string{" —", " -", ":"} {
+				if i := strings.Index(away, suffix); i >= 0 {
+					away = strings.TrimSpace(away[:i])
+				}
+			}
+			return home, away
+		}
+	}
+	return "", ""
+}
+
 // naturally excluded on the next BuildWatchlist run (~10 min).
 func evictFromWatchlist(conditionID string) {
 	watchlistMu.Lock()
@@ -493,6 +516,12 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 		// Baseball game-stage gate (Option B):
 		//   PASS if inning >= BaseballMinInning AND diff >= BaseballMinRunDiff
 		//   PASS if diff >= BaseballRunDiff  (blowout bypass, any inning)
+		//
+		// Two-feed strategy: read both Polymarket's sports feed AND the official
+		// MLB Stats feed (via official_collector). Polymarket's feed lags real
+		// time by 30s–2min and has been observed showing the wrong state during
+		// fast innings. We REQUIRE BOTH feeds to pass the gate; if the official
+		// feed is unavailable, fall back to Polymarket alone (graceful degrade).
 		if opp.Sport == "Baseball" && (cfg.BaseballMinInning > 0 || cfg.BaseballRunDiff > 0) {
 			gameID, ok := scanner.ResolveGameID(opp.Slug)
 			if !ok {
@@ -509,8 +538,26 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 					gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballMinRunDiff, cfg.BaseballRunDiff, opp.Side)
 				continue
 			}
-			log.Printf("[poll] baseball gate: ✓ game %d in %q (score %q) — (inning≥%d AND diff≥%d) or blowout≥%d OK",
-				gameID, ls.Period, ls.Score, cfg.BaseballMinInning, cfg.BaseballMinRunDiff, cfg.BaseballRunDiff)
+			// Second check: official MLB feed must also confirm.
+			homeTeam, awayTeam := splitMatchTeams(opp.Market)
+			lso, _ := database.GetLiveSportOfficial("Baseball", homeTeam, awayTeam)
+			if lso != nil {
+				if lso.Ended {
+					log.Printf("[poll] baseball gate: ✗ official feed says ENDED for %s vs %s — skipping %s",
+						homeTeam, awayTeam, opp.Side)
+					continue
+				}
+				if !market.GameStageOK(lso.Period, lso.Score, cfg.BaseballMinInning, cfg.BaseballRunDiff, cfg.BaseballMinRunDiff) {
+					log.Printf("[poll] baseball gate: ✗ official feed disagrees — Poly says %q/%q OK, MLB says %q/%q — skipping %s",
+						ls.Period, ls.Score, lso.Period, lso.Score, opp.Side)
+					continue
+				}
+				log.Printf("[poll] baseball gate: ✓ game %d in %q (score %q) — Poly+MLB agree (MLB: %q/%q) OK",
+					gameID, ls.Period, ls.Score, lso.Period, lso.Score)
+			} else {
+				log.Printf("[poll] baseball gate: ✓ game %d in %q (score %q) — Poly only (no official feed match for %s vs %s) OK",
+					gameID, ls.Period, ls.Score, homeTeam, awayTeam)
+			}
 		}
 
 		// Hockey game-stage gate: only enter from the min period on, or once the
@@ -548,13 +595,13 @@ func runPoll(ctx context.Context, cfg *config.Config, database *db.DB, scanner *
 				log.Printf("[poll] basketball gate: no live state for game %d (%s) — skipping", gameID, opp.Side)
 				continue
 			}
-			if !market.GameStageOK(ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff, 0) {
-				log.Printf("[poll] basketball gate: game %d in %q (score %q) — below quarter %d / point-diff %d, skipping %s",
-					gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff, opp.Side)
+			if !market.GameStageOK(ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff, cfg.BasketballMinPointDiff) {
+				log.Printf("[poll] basketball gate: game %d in %q (score %q) — below quarter %d+diff≥%d / blowout≥%d, skipping %s",
+					gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballMinPointDiff, cfg.BasketballPointDiff, opp.Side)
 				continue
 			}
-			log.Printf("[poll] basketball gate: ✓ game %d in %q (score %q) — quarter≥%d or pointDiff≥%d OK",
-				gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballPointDiff)
+			log.Printf("[poll] basketball gate: ✓ game %d in %q (score %q) — (quarter≥%d AND diff≥%d) or blowout≥%d OK",
+				gameID, ls.Period, ls.Score, cfg.BasketballMinQuarter, cfg.BasketballMinPointDiff, cfg.BasketballPointDiff)
 		}
 
 		// Route paper-only opportunities (e.g. tennis doubles) to the paper

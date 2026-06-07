@@ -177,14 +177,18 @@ type Config struct {
 	HockeyMinPeriod int
 	HockeyGoalDiff  int
 
-	// Basketball game-stage gate (NBA + WNBA). Enter only when the game has
-	// reached BasketballMinQuarter OR the point differential is at least
-	// BasketballPointDiff.
-	//   0/0 = disabled
-	//   4/25 = enter in the 4th quarter, or earlier if up by 25+ points
-	// BASKETBALL_MIN_QUARTER / BASKETBALL_POINT_DIFF (default 0)
-	BasketballMinQuarter int
-	BasketballPointDiff  int
+	// Basketball game-stage gate (NBA + WNBA). Two-armed gate matching baseball:
+	//   PASS if quarter >= BasketballMinQuarter AND diff >= BasketballMinPointDiff
+	//   PASS if diff >= BasketballPointDiff  (blowout bypass, any quarter)
+	// BasketballMinPointDiff is the cushion required when using the quarter gate.
+	// BasketballPointDiff is the larger "blowout" threshold that bypasses the
+	// quarter requirement entirely. When BasketballMinPointDiff=0 the gate falls
+	// back to the old OR behaviour (quarter≥min OR diff≥blowout).
+	//   3/25/18 = enter in Q3+ with 18-pt lead, or any quarter with 25+ blowout
+	// BASKETBALL_MIN_QUARTER / BASKETBALL_POINT_DIFF / BASKETBALL_MIN_POINT_DIFF (default 0)
+	BasketballMinQuarter  int
+	BasketballPointDiff   int
+	BasketballMinPointDiff int
 
 	// Bankroll floor expressed as a fraction of the current bankroll.
 	// Bot shuts down entirely if balance falls below (bankroll × floor pct).
@@ -239,6 +243,7 @@ func Load() *Config {
 		HockeyGoalDiff:        envInt("HOCKEY_GOAL_DIFF", 0),
 		BasketballMinQuarter:  envInt("BASKETBALL_MIN_QUARTER", 0),
 		BasketballPointDiff:   envInt("BASKETBALL_POINT_DIFF", 0),
+		BasketballMinPointDiff: envInt("BASKETBALL_MIN_POINT_DIFF", 0),
 		BankrollFloorPct:      envFloat("BANKROLL_FLOOR_PCT", 0.30),
 	}
 }

@@ -269,6 +269,38 @@ func (d *DB) GetLiveSport(gameID int) (*LiveSport, error) {
 	return &s, nil
 }
 
+// GetLiveSportOfficial returns the official-feed state for a game matched by
+// sport + team names (case-insensitive). Returns (nil, nil) if no match is
+// found or the official-feed table doesn't exist. Used to gate trades on the
+// canonical league feed (MLB Stats / NHL / NBA) instead of Polymarket's
+// laggier sports feed.
+//
+// The official feed score is "away-home" while Polymarket's is "home-away" —
+// this returns the score AS-RECORDED-IN-OFFICIAL (away-home). Callers should
+// be aware when computing run differentials (abs() is fine since it's symmetric).
+func (d *DB) GetLiveSportOfficial(sport, homeTeam, awayTeam string) (*LiveSport, error) {
+	var s LiveSport
+	var live, ended int
+	err := d.conn.QueryRow(`
+		SELECT 0 as game_id, sport, period, score, live, ended, updated_at
+		FROM live_sports_official
+		WHERE LOWER(sport) = LOWER(?)
+		  AND LOWER(home_team) = LOWER(?)
+		  AND LOWER(away_team) = LOWER(?)
+		ORDER BY updated_at DESC LIMIT 1
+	`, sport, homeTeam, awayTeam).Scan(&s.GameID, &s.Sport, &s.Period, &s.Score, &live, &ended, &s.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		// Table may not exist yet — treat as no data.
+		return nil, nil
+	}
+	s.Live = live == 1
+	s.Ended = ended == 1
+	return &s, nil
+}
+
 // ── Paper trade writes ───────────────────────────────────────────────────────
 
 // PaperTrade is what the bot inserts when DRY_RUN=true.
