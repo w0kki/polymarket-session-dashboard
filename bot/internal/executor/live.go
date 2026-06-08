@@ -162,18 +162,6 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		return fmt.Errorf("live: invalid token_id %q for %s", opp.TokenID, opp.ConditionID[:12])
 	}
 
-	salt, err := generateSalt()
-	if err != nil {
-		return fmt.Errorf("live: generate salt: %w", err)
-	}
-
-	tsMs := time.Now().UnixMilli()
-
-	sig, err := l.signOrder(salt, tokenID, makerAmt, takerAmt, 0, tsMs, opp.NegRisk)
-	if err != nil {
-		return fmt.Errorf("live: sign order: %w", err)
-	}
-
 	const bytes32ZeroHex = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 	type orderJSON struct {
@@ -198,50 +186,84 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 		Owner     string    `json:"owner"`
 	}
 
-	body := reqBody{
-		DeferExec: false,
-		Order: orderJSON{
-			Builder:       bytes32ZeroHex,
-			Expiration:    "0",
-			Maker:         l.proxyWallet, // deposit wallet is maker
-			MakerAmount:   fmt.Sprintf("%d", makerAmt),
-			Metadata:      bytes32ZeroHex,
-			Salt:          salt.Int64(),
-			Side:          "BUY",
-			Signature:     sig,
-			SignatureType: 3,             // POLY_1271 — ERC-7739 TypedDataSign
-			Signer:        l.proxyWallet, // deposit wallet is also signer for POLY_1271
-			TakerAmount:   fmt.Sprintf("%d", takerAmt),
-			Timestamp:     fmt.Sprintf("%d", tsMs),
-			TokenID:       opp.TokenID,
-		},
-		OrderType: "FAK",
-		Owner:     l.apiKey,
+	// submit signs and POSTs a fresh order. Used both for the initial attempt
+	// and for the FAK-rejection retry below.
+	submit := func() (*http.Response, map[string]interface{}, error) {
+		salt, err := generateSalt()
+		if err != nil {
+			return nil, nil, fmt.Errorf("live: generate salt: %w", err)
+		}
+		tsMs := time.Now().UnixMilli()
+		sig, err := l.signOrder(salt, tokenID, makerAmt, takerAmt, 0, tsMs, opp.NegRisk)
+		if err != nil {
+			return nil, nil, fmt.Errorf("live: sign order: %w", err)
+		}
+		body := reqBody{
+			DeferExec: false,
+			Order: orderJSON{
+				Builder:       bytes32ZeroHex,
+				Expiration:    "0",
+				Maker:         l.proxyWallet,
+				MakerAmount:   fmt.Sprintf("%d", makerAmt),
+				Metadata:      bytes32ZeroHex,
+				Salt:          salt.Int64(),
+				Side:          "BUY",
+				Signature:     sig,
+				SignatureType: 3,
+				Signer:        l.proxyWallet,
+				TakerAmount:   fmt.Sprintf("%d", takerAmt),
+				Timestamp:     fmt.Sprintf("%d", tsMs),
+				TokenID:       opp.TokenID,
+			},
+			OrderType: "FAK",
+			Owner:     l.apiKey,
+		}
+		bodyBytes, err := json.Marshal(body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("live: marshal order: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", clobBaseURL+"/order", bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, nil, fmt.Errorf("live: build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		l.setAuthHeaders(req, "POST", "/order", string(bodyBytes))
+		resp, err := l.client.Do(req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("live: POST /order: %w", err)
+		}
+		var result map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		return resp, result, nil
 	}
 
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("live: marshal order: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", clobBaseURL+"/order", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("live: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	l.setAuthHeaders(req, "POST", "/order", string(bodyBytes))
-
-	resp, err := l.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("live: POST /order: %w", err)
-	}
-	defer resp.Body.Close()
-
+	// FAK retry: when the CLOB returns "no orders found to match" the offer
+	// side disappeared between scan and order. Re-submitting after a short
+	// pause catches the next refreshed offer. We retry up to twice (3 attempts
+	// total) with 250ms spacing — total ≤500ms added latency on failure.
+	const maxFAKRetries = 2
+	var resp *http.Response
 	var result map[string]interface{}
-	_ = json.NewDecoder(resp.Body).Decode(&result)
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("live: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
+	var err error
+	for attempt := 0; attempt <= maxFAKRetries; attempt++ {
+		resp, result, err = submit()
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+			break // success path
+		}
+		// Detect the specific FAK no-match case for retry; all other errors fail fast.
+		errStr := fmt.Sprintf("%v", result)
+		isFAKNoMatch := resp.StatusCode == http.StatusBadRequest &&
+			strings.Contains(errStr, "no orders found to match")
+		if !isFAKNoMatch || attempt == maxFAKRetries {
+			return fmt.Errorf("live: CLOB rejected order (HTTP %d): %v", resp.StatusCode, result)
+		}
+		log.Printf("[live] FAK retry %d/%d for %s — offer disappeared, re-submitting in 250ms",
+			attempt+1, maxFAKRetries, opp.Side)
+		time.Sleep(250 * time.Millisecond)
 	}
 
 	// The CLOB accepts our POLY_1271 buys with status:"delayed" (the norm for
