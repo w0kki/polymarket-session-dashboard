@@ -303,20 +303,25 @@ func main() {
 // Called when order placement returns order_version_mismatch — the CLOB has
 // closed the market but hasn't updated accepting_orders yet. The market will be
 // splitMatchTeams parses a Polymarket market question like
-// "Detroit Tigers vs. Tampa Bay Rays" into ("Detroit Tigers", "Tampa Bay Rays").
-// Polymarket always lists home team first in MLB markets. Handles "vs." and "vs"
-// separators, trimming whitespace and punctuation. Returns ("", "") on failure.
+// "Boston Red Sox vs. New York Yankees" and returns (homeTeam, awayTeam).
+//
+// IMPORTANT: Polymarket lists the AWAY team FIRST (matches MLB slug convention
+// like "mlb-bos-nyy-2026-06-06" where Boston is at Yankees). So "X vs. Y" means
+// X is away, Y is home. The function returns them in (home, away) order to
+// match the official feed schema.
+//
+// Returns ("", "") if the question can't be parsed.
 func splitMatchTeams(question string) (home, away string) {
 	q := question
-	// Polymarket usually formats as "Home vs. Away" — try " vs. " first, fall back to " vs ".
+	// Polymarket format: "Away vs. Home" — try " vs. " first, fall back to " vs ".
 	for _, sep := range []string{" vs. ", " vs "} {
 		if idx := strings.Index(strings.ToLower(q), sep); idx >= 0 {
-			home = strings.TrimSpace(q[:idx])
-			away = strings.TrimSpace(q[idx+len(sep):])
+			away = strings.TrimSpace(q[:idx])
+			home = strings.TrimSpace(q[idx+len(sep):])
 			// Some markets append " — Moneyline" or similar; strip after a long-dash or colon.
 			for _, suffix := range []string{" —", " -", ":"} {
-				if i := strings.Index(away, suffix); i >= 0 {
-					away = strings.TrimSpace(away[:i])
+				if i := strings.Index(home, suffix); i >= 0 {
+					home = strings.TrimSpace(home[:i])
 				}
 			}
 			return home, away
