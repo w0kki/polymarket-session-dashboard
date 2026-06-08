@@ -39,7 +39,12 @@ WS_URL = "wss://sports-api.polymarket.com/ws"
 BACKOFF_BASE = 1.0    # seconds — fast reconnect after a normal drop
 BACKOFF_MAX = 30.0    # cap for repeated connect failures
 STABLE_UPTIME = 5.0   # a connection that lived this long counts as "real"
-STALE_SECS = 60.0     # force reconnect if no message arrives for this long
+STALE_SECS = 180.0    # force reconnect if no message arrives for this long. 60s
+                      # was too aggressive for MLB — innings often have 60+s of
+                      # pitcher delays / between-pitch quiet, causing needless
+                      # reconnect churn. 180s tolerates normal game cadence
+                      # while still recovering within ~3 min if the server
+                      # genuinely stops pushing.
 
 _conn = None
 
