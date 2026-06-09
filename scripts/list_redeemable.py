@@ -69,8 +69,11 @@ def main():
         val = pos.get("currentValue", 0)
         title = (pos.get("title") or "")[:50]
         outcome = (pos.get("outcome") or "")[:25]
-        slug = pos.get("slug") or ""
-        url = f"https://polymarket.com/event/{slug}"
+        # For negRisk markets, `slug` includes an outcome suffix (e.g. "-bou")
+        # that 404s in the UI. `eventSlug` is the parent event slug that loads
+        # the actual page. For non-negRisk both are equivalent.
+        url_slug = pos.get("eventSlug") or pos.get("slug") or ""
+        url = f"https://polymarket.com/event/{url_slug}"
         neg = " [NR]" if pos.get("negativeRisk") else ""
         print(f"{i:<3} ${val:>6.2f}  {outcome:<25} {title:<50}  {url}{neg}")
 
