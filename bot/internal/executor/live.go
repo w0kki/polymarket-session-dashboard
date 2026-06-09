@@ -283,24 +283,47 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 	// Confirm the position actually appeared on-chain. If it doesn't within the
 	// confirmation window, return ErrOrderUnconfirmed: the caller keeps the
 	// market deduped (so we don't re-fire) but records nothing and stays quiet.
-	if !l.confirmFill(ctx, opp.ConditionID) {
+	//
+	// IMPORTANT: confirmFill returns the ACTUAL on-chain shares + avg price.
+	// FAK orders frequently partially fill — accepting status=matched/delayed
+	// even when only a small fraction of the intended taker amount executes.
+	// Recording the INTENDED size would inflate P&L when only ~10% filled.
+	filledShares, filledAvgPrice, ok := l.confirmFill(ctx, opp.ConditionID)
+	if !ok {
 		return fmt.Errorf("%w (status=%q)", ErrOrderUnconfirmed, status)
 	}
 
-	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | status=%s filled=confirmed",
-		opp.Sport, truncate(opp.Market, 50), opp.Side, opp.Price*100, opp.SizeUSDC, status)
+	// Use on-chain truth for entry record. Fall back to intended values if the
+	// data-api returned the row but with avgPrice=0 (rare; protects against div-by-0).
+	entryPrice := filledAvgPrice
+	if entryPrice <= 0 {
+		entryPrice = opp.Price
+	}
+	actualShares := filledShares
+	actualSizeUSDC := actualShares * entryPrice
+
+	// Log both the intended and actual when there's a meaningful partial fill so
+	// we can spot persistent thin-book offenders. >10% gap counts as "partial."
+	intentRatio := actualSizeUSDC / opp.SizeUSDC
+	if intentRatio < 0.9 {
+		log.Printf("[LIVE] ⚠️  PARTIAL FILL: %s intended $%.2f / %.2f shares but on-chain shows $%.2f / %.2f shares (%.0f%% filled)",
+			opp.Side, opp.SizeUSDC, opp.Shares, actualSizeUSDC, actualShares, intentRatio*100)
+	}
+
+	log.Printf("[LIVE] ✅ %-10s | %-50s | %s @ %.1f¢ | $%.2f | shares=%.2f | status=%s filled=confirmed",
+		opp.Sport, truncate(opp.Market, 50), opp.Side, entryPrice*100, actualSizeUSDC, actualShares, status)
 
 	if l.db != nil {
-		buyFee := kelly.CalcBuyFee(opp.Shares, opp.Price, opp.Sport)
+		buyFee := kelly.CalcBuyFee(actualShares, entryPrice, opp.Sport)
 		if err := l.db.InsertLiveTrade(db.PaperTrade{
 			ConditionID: opp.ConditionID,
 			Market:      opp.Market,
 			Slug:        opp.Slug,
 			Sport:       opp.Sport,
 			Side:        opp.Side,
-			EntryPrice:  opp.Price,
-			Shares:      opp.Shares,
-			SizeUSDC:    opp.SizeUSDC,
+			EntryPrice:  entryPrice,
+			Shares:      actualShares,
+			SizeUSDC:    actualSizeUSDC,
 			BuyFee:      buyFee,
 		}); err != nil {
 			log.Printf("[LIVE] warning: DB write failed for %s: %v", opp.ConditionID[:12], err)
@@ -316,14 +339,24 @@ func (l *LiveExecutor) PlaceOrder(ctx context.Context, opp market.Opportunity) e
 var ErrOrderUnconfirmed = errors.New("order accepted but fill not confirmed on-chain")
 
 // confirmFill polls the deposit wallet's on-chain positions for the given
-// market and returns true once a position with size > 0 appears. This is the
-// authoritative signal that a "delayed" order actually executed.
-func (l *LiveExecutor) confirmFill(ctx context.Context, conditionID string) bool {
+// market and returns the actual filled size + avg price once a position with
+// size > 0 appears. This is the authoritative signal that a "delayed" order
+// actually executed.
+//
+// FAK orders may be PARTIALLY filled — the CLOB accepts the order with
+// status=matched/delayed even when only a small fraction of the requested
+// taker amount actually executes. Reporting the INTENDED size in the DB
+// then inflates wins/losses by 10x or more when only ~10% of the order
+// filled. Always record the on-chain truth.
+//
+// Returns (filledShares, avgPriceUSD, true) on success; (0, 0, false) if no
+// position appears within the polling window.
+func (l *LiveExecutor) confirmFill(ctx context.Context, conditionID string) (float64, float64, bool) {
 	url := "https://data-api.polymarket.com/positions?user=" + l.proxyWallet
 	for attempt := 0; attempt < 5; attempt++ {
 		select {
 		case <-ctx.Done():
-			return false
+			return 0, 0, false
 		case <-time.After(2 * time.Second): // let the fill settle on-chain
 		}
 
@@ -338,17 +371,18 @@ func (l *LiveExecutor) confirmFill(ctx context.Context, conditionID string) bool
 		var positions []struct {
 			ConditionID string  `json:"conditionId"`
 			Size        float64 `json:"size"`
+			AvgPrice    float64 `json:"avgPrice"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&positions)
 		resp.Body.Close()
 
 		for _, p := range positions {
 			if strings.EqualFold(p.ConditionID, conditionID) && p.Size > 0 {
-				return true
+				return p.Size, p.AvgPrice, true
 			}
 		}
 	}
-	return false
+	return 0, 0, false
 }
 
 // VerifyCredentials calls GET /auth/api-keys to confirm the L2 credentials are valid.
