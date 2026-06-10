@@ -82,16 +82,22 @@ func (d *DB) GetTradeStats() (*TradeStats, error) {
 	}, nil
 }
 
-// CurrentStreak walks the most recent SETTLED live trades (newest first) and
-// counts how many in a row share the same outcome category (WIN vs LOSS/
-// STOP_LOSS). Returns the length and the kind ("WIN" or "LOSS"). If no settled
-// trades exist returns (0, "", nil).
+// CurrentStreak walks the most recent SETTLED live trades by ENTRY order
+// (newest first_seen_at first) and counts how many in a row share the same
+// outcome category (WIN vs LOSS/STOP_LOSS). Returns the length and the kind
+// ("WIN" or "LOSS"). If no settled trades exist returns (0, "", nil).
+//
+// We order by first_seen_at (when the position was opened) NOT updated_at
+// (when it resolved). Otherwise a position you opened before a stop-loss
+// but which resolved AFTER the stop fired would appear to come "after" the
+// stop in the ledger — making the streak undercount the true entry-order
+// run. This matches the dashboard's currentWinStreak() convention.
 func (d *DB) CurrentStreak() (length int, kind string, err error) {
 	rows, qerr := d.conn.Query(`
 		SELECT outcome FROM trades
 		WHERE trade_type IN ('Risk Premia', 'Latency Arb')
 		  AND outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
-		ORDER BY updated_at DESC
+		ORDER BY first_seen_at DESC
 		LIMIT 500
 	`)
 	if qerr != nil {
