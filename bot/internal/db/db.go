@@ -82,6 +82,47 @@ func (d *DB) GetTradeStats() (*TradeStats, error) {
 	}, nil
 }
 
+// CurrentStreak walks the most recent SETTLED live trades (newest first) and
+// counts how many in a row share the same outcome category (WIN vs LOSS/
+// STOP_LOSS). Returns the length and the kind ("WIN" or "LOSS"). If no settled
+// trades exist returns (0, "", nil).
+func (d *DB) CurrentStreak() (length int, kind string, err error) {
+	rows, qerr := d.conn.Query(`
+		SELECT outcome FROM trades
+		WHERE trade_type IN ('Risk Premia', 'Latency Arb')
+		  AND outcome IN ('WIN', 'LOSS', 'STOP_LOSS')
+		ORDER BY updated_at DESC
+		LIMIT 500
+	`)
+	if qerr != nil {
+		return 0, "", fmt.Errorf("current streak: %w", qerr)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var outcome string
+		if scanErr := rows.Scan(&outcome); scanErr != nil {
+			return length, kind, scanErr
+		}
+		var thisKind string
+		if outcome == "WIN" {
+			thisKind = "WIN"
+		} else {
+			thisKind = "LOSS"
+		}
+		if kind == "" {
+			kind = thisKind
+			length = 1
+			continue
+		}
+		if thisKind != kind {
+			break
+		}
+		length++
+	}
+	return length, kind, nil
+}
+
 // ── Deduplication ────────────────────────────────────────────────────────────
 
 // IsAlreadyTraded returns true if a conditionId already exists in the trades

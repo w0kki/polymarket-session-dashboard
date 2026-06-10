@@ -299,6 +299,27 @@ func main() {
 	}
 }
 
+// helpText returns the canonical command list shown by /help and the unknown-
+// command fallback. Keep this synced with the command switch in the Telegram
+// listener — if you add a command, add it here too.
+func helpText() string {
+	return "📖 BOT COMMANDS\n\n" +
+		"State & info\n" +
+		"/status — bot state, balance, P&L, current streak\n" +
+		"/help — show this message\n\n" +
+		"Trading control\n" +
+		"/live — switch to LIVE trading (real money)\n" +
+		"/paper — switch to PAPER trading (no real orders)\n" +
+		"/kill — halt all trading (bot stays alive, dormant)\n" +
+		"/startup — resume trading after /kill; also clears today's daily-loss halt + circuit breaker\n" +
+		"/stop — graceful shutdown (pm2 restarts automatically)\n\n" +
+		"Tuning (live, no restart needed)\n" +
+		"/bankroll <amount> — update bankroll baseline, e.g. /bankroll 2500\n" +
+		"/fallback <amount> — update per-trade size, e.g. /fallback 100\n" +
+		"/stoploss <cents> — update global stop-loss drop, e.g. /stoploss 40\n" +
+		"/clearbreaker — clear the circuit-breaker halt"
+}
+
 // evictFromWatchlist removes a single market from the in-memory watchlist.
 // Called when order placement returns order_version_mismatch — the CLOB has
 // closed the market but hasn't updated accepting_orders yet. The market will be
@@ -1203,6 +1224,21 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 				tradingMsg = fmt.Sprintf("HALTED (daily loss limit -$%.0f) — resumes midnight UTC", cfg.MaxDailyLoss)
 			}
 
+			streakLen, streakKind, _ := database.CurrentStreak()
+			streakMsg := "n/a"
+			if streakLen > 0 {
+				emoji := "✅"
+				label := "win"
+				if streakKind == "LOSS" {
+					emoji = "🔴"
+					label = "loss"
+				}
+				if streakLen != 1 {
+					label = label + "s"
+				}
+				streakMsg = fmt.Sprintf("%s %d %s", emoji, streakLen, label)
+			}
+
 			n.Broadcast(fmt.Sprintf(
 				"📊 BOT STATUS\n"+
 					"Mode: %s (override: %s)\n"+
@@ -1212,6 +1248,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 					"Fallback size: $%.2f\n"+
 					"Open paper trades: %d\n"+
 					"Open live trades: %d\n"+
+					"Current streak: %s\n"+
 					"Today P&L: $%.2f (daily limit -$%.0f)\n"+
 					"All-time P&L: $%.2f\n"+
 					"Bankroll: $%.2f | %s: $%.2f",
@@ -1222,6 +1259,7 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 				effectiveFallback(cfg, database),
 				len(paperTrades),
 				len(liveTrades),
+				streakMsg,
 				todayPnL, cfg.MaxDailyLoss,
 				allPnL,
 				bankroll, balanceLabel, balance,
@@ -1379,19 +1417,11 @@ func makeCmdHandler(cfg *config.Config, database *db.DB, n *notify.Notifier) not
 			log.Println("[cmd] switching to PAPER mode via Telegram")
 			selfSignal()
 
+		case "help":
+			n.Broadcast(helpText())
+
 		default:
-			n.Broadcast(fmt.Sprintf(
-				"❓ Unknown command: /%s\n\nAvailable commands:\n"+
-					"/status — bot state & P&L\n"+
-					"/bankroll <amount> — update bankroll e.g. /bankroll 1500\n"+
-					"/clearbreaker — clear circuit breaker\n"+
-					"/live — switch to live trading\n"+
-					"/paper — switch to paper trading\n"+
-					"/kill — halt all trading (bot stays alive, dormant)\n"+
-					"/startup — resume trading after /kill\n"+
-					"/stop — graceful shutdown (pm2 restarts automatically)",
-				cmd,
-			))
+			n.Broadcast(fmt.Sprintf("❓ Unknown command: /%s\n\n%s", cmd, helpText()))
 		}
 	}
 }
